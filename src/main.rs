@@ -92,6 +92,42 @@ fn recurrence_matrix2(e: f32, vec1: &[f32], vec2: &[f32]) -> Vec<Vec<f32>> {
     matrix
 }
 
+
+// non symmetrical excerpt
+fn recurrence_matrix2square(e: f32, vec1: &[f32], vec2: &[f32]) -> Vec<Vec<f32>> {
+    let mut matrix: Vec<Vec<f32>> = vec![];
+    let n = vec1.len() / 2;
+    let start_idx = n;
+    for i in 0..n {
+        let mut row = vec![];
+        for j in n..(n*2) {
+            //            row.push(heaviside(e - (item_i - item_j).abs()))
+            //            row.push(norm(*item_i, *item_j))
+            row.push((vec1[i] - vec2[j]).abs())
+            //            row.push((item_i - item_j).powi(2))
+        }
+        matrix.push(row)
+    }
+    matrix
+}
+
+
+fn recurrence_matrix2rev(e: f32, vec1: &[f32], vec2: &[f32]) -> Vec<Vec<f32>> {
+    let mut matrix: Vec<Vec<f32>> = vec![];
+    for item_i in vec1.iter() {
+        let mut row = vec![];
+        for item_j in vec2.iter().rev() {
+            //            row.push(heaviside(e - (item_i - item_j).abs()))
+            //            row.push(norm(*item_i, *item_j))
+            row.push((item_i - item_j).abs())
+            //            row.push((item_i - item_j).powi(2))
+        }
+        matrix.push(row)
+    }
+    matrix
+}
+
+
 fn recurrence_matrix3(
     e: f32,
     vec1: &[f32],
@@ -124,13 +160,36 @@ fn recurrence_matrix3interp(e: f32, vec1: &[f32], vec2: &[f32], vec3: &[f32]) ->
     for i in 0..n {
         let mut row = vec![];
         let ratio = i as f32 / n as f32;
-        let x = (vec1[i] * (1.0 - ratio)) + (vec2[i] * ratio);
+        let idx_x = i;
+        let x = if ratio < 2.0/3.0 {
+            vec1[idx_x]
+        } else {
+            let adjusted_ratio = (ratio - 2.0/3.0) * 3.0;
+            vec1[idx_x] * (1.0 - adjusted_ratio) + vec3[idx_x] * adjusted_ratio
+        };
         for j in 0..n {
-            let y = vec3[j];
+            let idx_y = n - 1 - j;
+            let y = if ratio > 1.0/3.0 {    
+                vec3[idx_y]
+            } else {
+                vec2[idx_y] * (1.0 - (ratio * 3.0)) + vec3[idx_y] * (ratio * 3.0)
+            };
             row.push((x - y).abs())
         }
         matrix.push(row)
+        
     }
+    
+    // for i in 0..n {
+    //     let mut row = vec![];
+    //     let ratio = i as f32 / n as f32;
+    //     let x = (vec1[i] * (1.0 - ratio)) + (vec2[i] * ratio);
+    //     for j in 0..n {
+    //         let y = vec3[j];
+    //         row.push((x - y).abs())
+    //     }
+    //     matrix.push(row)
+    // }
     /*  let total_n = n * 2;
     for i in 0..total_n {
         let mut row = vec![];
@@ -213,6 +272,7 @@ impl FilteredBuffer {
 enum Mode {
     XY,
     Recurrence,
+    RecurrenceRev,
     RecurrenceThreeMulti,
     RecurrenceThreeSum,
     RecurrenceThreeColor,
@@ -271,6 +331,7 @@ impl App {
                 Mode::Recurrence
                 | Mode::RecurrenceThreeColor
                 | Mode::RecurrenceThreeMulti
+                | Mode::RecurrenceRev
                 | Mode::RecurrenceThreeSum => {
                     let length = matrix2d.len() as f64;
                     let xfac = args.window_size[0] / length;
@@ -291,7 +352,10 @@ impl App {
                             rectangle(g, r, c.transform, gl);
                         })
                     })
-                } /*   Mode::RecurrenceThreeColor
+                }
+                
+                
+                 /*   Mode::RecurrenceThreeColor
                   | Mode::RecurrenceThreeMulti
                   | Mode::RecurrenceThreeSum => {
                       let length = matrix3d.len() as f64;
@@ -379,6 +443,13 @@ impl App {
                     &self.filtered_buffer2.buffer,
                 )
             }
+            Mode::RecurrenceRev => {
+                self.rec_matrix2d = recurrence_matrix2rev(
+                    e,
+                    &self.filtered_buffer1.buffer,
+                    &self.filtered_buffer2.buffer,
+                )
+            }
             Mode::RecurrenceThreeMulti | Mode::RecurrenceThreeColor | Mode::RecurrenceThreeSum => {
                 self.rec_matrix3d = recurrence_matrix3(
                     e,
@@ -386,12 +457,13 @@ impl App {
                     &self.filtered_buffer2.buffer,
                     &self.filtered_buffer3.buffer,
                 );
-                self.rec_matrix2d = recurrence_matrix3interp(
+                self.rec_matrix2d = recurrence_matrix2square(
                     e,
                     &self.filtered_buffer1.buffer,
                     &self.filtered_buffer2.buffer,
-                    &self.filtered_buffer3.buffer,
-                )
+                );
+            //  &self.filtered_buffer3.buffer,
+                
             }
         }
     }
@@ -448,9 +520,9 @@ fn main() {
         buffer1: vec![],
         buffer2: vec![],
         buffer3: vec![],
-        filtered_buffer1: FilteredBuffer::new(600, 1),
-        filtered_buffer2: FilteredBuffer::new(600, 1),
-        filtered_buffer3: FilteredBuffer::new(600, 1),
+        filtered_buffer1: FilteredBuffer::new(800, 1),
+        filtered_buffer2: FilteredBuffer::new(800, 1),
+        filtered_buffer3: FilteredBuffer::new(800, 1),
         mode: Mode::Recurrence,
         factor: 1.0,
         exponent: 1.0,
@@ -458,7 +530,8 @@ fn main() {
         rec_matrix3d: vec![],
     };
 
-    let settings = EventSettings::new();
+    let mut settings = EventSettings::new();
+    settings.max_fps = 30;
     //    settings.ups = 30;
     let mut events = Events::new(settings);
     while let Some(e) = events.next(&mut window) {
@@ -469,6 +542,7 @@ fn main() {
                 "3" => app.mode = Mode::RecurrenceThreeColor,
                 "4" => app.mode = Mode::RecurrenceThreeMulti,
                 "5" => app.mode = Mode::RecurrenceThreeSum,
+                "6" => app.mode = Mode::RecurrenceRev,                
                 "-" => app.factor = app.factor - 0.1,
                 "+" => app.factor = app.factor + 0.1,
                 "<" => app.exponent = app.exponent - 0.1,
