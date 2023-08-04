@@ -7,6 +7,13 @@ use piston::input::{Event, Input};
 use piston::input::{RenderArgs, RenderEvent, UpdateArgs, UpdateEvent};
 use piston::window::WindowSettings;
 use ringbuf::{Consumer, Producer, RingBuffer};
+use rosc::OscPacket;
+//use std::env;
+use std::net::{SocketAddrV4, UdpSocket, Ipv4Addr};
+//use std::str::FromStr;
+use std::thread;
+use std::sync::mpsc;
+
 
 const FRAME_SIZE: usize = 1024;
 
@@ -93,22 +100,29 @@ fn recurrence_matrix2(e: f32, vec1: &[f32], vec2: &[f32]) -> Vec<Vec<f32>> {
 }
 
 
+fn lag2ud(current: f32, target: f32, factor_up: f32, factor_down: f32) -> f32 {
+    if (current - target).abs() < 0.00001 {
+        target
+    } else {
+        if target > current {
+            target + factor_up * (current - target)
+        } else {
+            target + factor_down * (current - target)
+        }
+    }
+}
+
 // non symmetrical excerpt
-fn recurrence_matrix2square(e: f32, vec1: &[f32], vec2: &[f32]) -> Vec<Vec<f32>> {
-    let mut matrix: Vec<Vec<f32>> = vec![];
+fn recurrence_matrix2square(e: f32, vec1: &[f32], vec2: &[f32], matrix: &mut [[f32; 400]; 400], down_fac: f32, up_fac: f32) {
     let n = vec1.len() / 2;
-    let start_idx = n;
     for i in 0..n {
-        let mut row = vec![];
         for j in n..(n*2) {
             //            row.push(heaviside(e - (item_i - item_j).abs()))
             //            row.push(norm(*item_i, *item_j))
-            row.push((vec1[i] - vec2[j]).abs())
+            matrix[i][j-n] = lag2ud(matrix[i][j-n], (vec1[i] - vec2[j]).abs(), up_fac, down_fac);
             //            row.push((item_i - item_j).powi(2))
         }
-        matrix.push(row)
     }
-    matrix
 }
 
 
@@ -289,9 +303,17 @@ pub struct App {
     mode: Mode,
     factor: f32,
     exponent: f32,
+    rec_matrix2darray: [[f32; 400]; 400],
     rec_matrix2d: Vec<Vec<f32>>,
     rec_matrix3d: Vec<Vec<(f32, f32, f32)>>,
+    down_fac: f32,
+    up_fac: f32,
+    bwmode: u8,
+    offset_x: i32,
+    offset_y: i32,
+    zoom: f32,
 }
+
 
 impl App {
     fn render(&mut self, args: &RenderArgs) {
@@ -300,10 +322,15 @@ impl App {
         let filtered_buffer1 = &self.filtered_buffer1;
         let filtered_buffer2 = &self.filtered_buffer2;
         let matrix2d = &self.rec_matrix2d;
+        let matrix2darray = &self.rec_matrix2darray;
         let matrix3d = &self.rec_matrix3d;
         let mode = &self.mode;
         let factor = self.factor;
         let exponent = self.exponent;
+        let bwmode = &self.bwmode;
+        let zoom = &self.zoom;
+        let offset_x = &self.offset_x;
+        let offset_y = &self.offset_y;
 
         self.gl.draw(args.viewport(), |c, gl| {
             clear(graphics::color::BLACK, gl);
@@ -333,13 +360,22 @@ impl App {
                 | Mode::RecurrenceThreeMulti
                 | Mode::RecurrenceRev
                 | Mode::RecurrenceThreeSum => {
-                    let length = matrix2d.len() as f64;
+                    let n = (matrix2darray.len() as f32 / (*zoom).max(1.0)).ceil();
+                    let length = n as f64 ;
                     let xfac = args.window_size[0] / length;
                     let yfac = args.window_size[1] / length;
 
-                    matrix2d.iter().enumerate().for_each(|(i, vec)| {
-                        vec.iter().enumerate().for_each(|(j, val)| {
-                            let g = color::alpha((*val * factor).powf(exponent));
+                    let to_skip_x = (matrix2darray.len()- n as usize).min(*offset_x as usize) ; 
+                    let to_skip_y = (matrix2darray.len()- n as usize).min(*offset_y as usize) ; 
+                   // println!("to skip {}, offset {}", to_skip, offset); 
+
+                    matrix2darray.iter().skip(to_skip_x).take(n as usize).enumerate().for_each(|(i, vec)| {
+                        vec.iter().skip(to_skip_y).take(n as usize).enumerate().for_each(|(j, val)| {
+                            let mut value = *val * factor;
+                            if *bwmode == 1 {
+                                value = 1.0 - value;
+                            }
+                            let g = color::alpha(value.powf(exponent));
 
                             //let y = (args.window_size[1] / 2.0) + (80 * filter_idx) as f64;
                             //                let r = Rectangle::new(g);
@@ -390,6 +426,8 @@ impl App {
         consumer1: &mut Consumer<f32>,
         consumer2: &mut Consumer<f32>,
         consumer3: &mut Consumer<f32>,
+        down_fac: f32,
+        up_fac: f32,
     ) {
         self.buffer1 = vec![];
         self.buffer2 = vec![];
@@ -457,10 +495,13 @@ impl App {
                     &self.filtered_buffer2.buffer,
                     &self.filtered_buffer3.buffer,
                 );
-                self.rec_matrix2d = recurrence_matrix2square(
+                recurrence_matrix2square(
                     e,
                     &self.filtered_buffer1.buffer,
                     &self.filtered_buffer2.buffer,
+                    &mut self.rec_matrix2darray,
+                    down_fac,
+                    up_fac,
                 );
             //  &self.filtered_buffer3.buffer,
                 
@@ -468,6 +509,36 @@ impl App {
         }
     }
 }
+
+
+fn handle_packet(packet: OscPacket) {
+    match packet {
+        OscPacket::Message(msg) => {
+            println!("OSC address: {}", msg.addr);
+            println!("OSC arguments: {:?}", msg.args);
+        }
+        OscPacket::Bundle(bundle) => {
+            println!("OSC Bundle: {:?}", bundle);
+        }
+    }
+}
+
+fn float_osc(p: OscPacket) -> Option<f32> {
+    if let OscPacket::Message(msg) = p {
+        msg.args.first().and_then(move |v| rosc::OscType::float(v.clone()))
+    } else {
+        None
+    }
+}
+
+fn int_osc(p: OscPacket) -> Option<i32> {
+    if let OscPacket::Message(msg) = p {
+        msg.args.first().and_then(move |v| rosc::OscType::int(v.clone()))
+    } else {
+        None
+    }
+}
+
 
 fn main() {
     let (client, _status) =
@@ -526,14 +597,48 @@ fn main() {
         mode: Mode::Recurrence,
         factor: 1.0,
         exponent: 1.0,
+        rec_matrix2darray: [[0.0; 400]; 400],
         rec_matrix2d: vec![],
         rec_matrix3d: vec![],
+        down_fac: 0.9,
+        up_fac: 0.1,
+        bwmode: 0,
+        offset_x: 0,
+        offset_y: 0,
+        zoom: 1.0,
     };
 
     let mut settings = EventSettings::new();
     settings.max_fps = 30;
     //    settings.ups = 30;
     let mut events = Events::new(settings);
+
+    let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 8000);
+    let sock = UdpSocket::bind(addr).unwrap();
+    println!("Listening to {}", addr);
+    let (tx, rx) = mpsc::channel();
+
+
+    thread::spawn(move || {
+        let mut buf = [0u8; rosc::decoder::MTU];
+
+        loop {
+               match sock.recv_from(&mut buf) {
+                    Ok((size, addr)) => {
+                        //println!("Received packet with size {} from: {}", size, addr);
+                        let (_, packet) = rosc::decoder::decode_udp(&buf[..size]).unwrap();
+                        tx.send(packet).unwrap();
+                        //handle_packet(packet);
+                    }   
+                    Err(e) => {
+                        println!("Error receiving from socket: {}", e);
+                        break;
+                    }
+                }
+            }
+    }
+    );
+
     while let Some(e) = events.next(&mut window) {
         match &e {
             Event::Input(Input::Text(t), _) => match t.as_str() {
@@ -553,12 +658,62 @@ fn main() {
             _ => (),
         }
 
+        match rx.try_recv() {
+            Ok(p) => {
+                match p.clone() {
+                    OscPacket::Message(msg) => {
+                        match msg.addr.as_str() {
+                            "/facdown" => {
+                                float_osc(p).map(|f| app.down_fac = f);
+                                ()
+                            },
+                            "/facup" => {
+                                float_osc(p).map(|f| app.up_fac = f);
+                                ()
+                            },
+                            "/factor" => {
+                                float_osc(p).map(|f| app.factor = f);
+                                ()
+                            },
+                            "/exponent" => {
+                                float_osc(p).map(|f| app.exponent = f);
+                                ()
+                            },
+                            "/bwmode" => {
+                                int_osc(p).map(|f| app.bwmode = f as u8);
+                                ()
+                            },
+                            "/offsetx" => {
+                                int_osc(p).map(|f| app.offset_x = f);
+                                ()
+                            },
+                            "/offsety" => {
+                                int_osc(p).map(|f| app.offset_y = f);
+                                ()
+                            },
+                            "/zoom" => {
+                                float_osc(p).map(|f| app.zoom = f);
+                                ()
+                            },
+                            
+                            _ => println!("unkown addr"),
+                        }
+                    }
+                    _ => {
+                        ()
+                    }
+                }
+            }
+            _ => ()
+        };
+    
+
         if let Some(args) = e.render_args() {
             app.render(&args);
         }
 
         if let Some(args) = e.update_args() {
-            app.update(&args, &mut consumer_1, &mut consumer_2, &mut consumer_3);
+            app.update(&args, &mut consumer_1, &mut consumer_2, &mut consumer_3, app.down_fac, app.up_fac);
         }
     }
 }
