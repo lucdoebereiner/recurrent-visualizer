@@ -9,11 +9,10 @@ use piston::window::WindowSettings;
 use ringbuf::{Consumer, Producer, RingBuffer};
 use rosc::OscPacket;
 //use std::env;
-use std::net::{SocketAddrV4, UdpSocket, Ipv4Addr};
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 //use std::str::FromStr;
-use std::thread;
 use std::sync::mpsc;
-
+use std::thread;
 
 const FRAME_SIZE: usize = 1024;
 
@@ -99,7 +98,6 @@ fn recurrence_matrix2(e: f32, vec1: &[f32], vec2: &[f32]) -> Vec<Vec<f32>> {
     matrix
 }
 
-
 fn lag2ud(current: f32, target: f32, factor_up: f32, factor_down: f32) -> f32 {
     if (current - target).abs() < 0.00001 {
         target
@@ -113,18 +111,29 @@ fn lag2ud(current: f32, target: f32, factor_up: f32, factor_down: f32) -> f32 {
 }
 
 // non symmetrical excerpt
-fn recurrence_matrix2square(e: f32, vec1: &[f32], vec2: &[f32], matrix: &mut [[f32; 400]; 400], down_fac: f32, up_fac: f32) {
+fn recurrence_matrix2square(
+    e: f32,
+    vec1: &[f32],
+    vec2: &[f32],
+    matrix: &mut [[f32; 400]; 400],
+    down_fac: f32,
+    up_fac: f32,
+) {
     let n = vec1.len() / 2;
     for i in 0..n {
-        for j in n..(n*2) {
+        for j in n..(n * 2) {
             //            row.push(heaviside(e - (item_i - item_j).abs()))
             //            row.push(norm(*item_i, *item_j))
-            matrix[i][j-n] = lag2ud(matrix[i][j-n], (vec1[i] - vec2[j]).abs(), up_fac, down_fac);
+            matrix[i][j - n] = lag2ud(
+                matrix[i][j - n],
+                (vec1[i] - vec2[j]).abs(),
+                up_fac,
+                down_fac,
+            );
             //            row.push((item_i - item_j).powi(2))
         }
     }
 }
-
 
 fn recurrence_matrix2rev(e: f32, vec1: &[f32], vec2: &[f32]) -> Vec<Vec<f32>> {
     let mut matrix: Vec<Vec<f32>> = vec![];
@@ -141,29 +150,20 @@ fn recurrence_matrix2rev(e: f32, vec1: &[f32], vec2: &[f32]) -> Vec<Vec<f32>> {
     matrix
 }
 
-
-fn recurrence_matrix3(
-    e: f32,
-    vec1: &[f32],
-    vec2: &[f32],
-    vec3: &[f32],
-) -> Vec<Vec<(f32, f32, f32)>> {
-    let mut matrix: Vec<Vec<(f32, f32, f32)>> = vec![];
+fn recurrence_matrix3(e: f32, vec1: &[f32], vec2: &[f32], vec3: &[f32]) -> Vec<Vec<f32>> {
+    let mut matrix: Vec<Vec<f32>> = vec![];
     let n = vec1.len();
-    for item_i in vec1.iter() {
-        let mut row = vec![];
-        for i in 0..n {
-            let item_j = vec2[i];
-            let item_k = vec3[i];
-            row.push((
-                (item_i - item_j).abs(),
-                (item_i - item_k).abs(),
-                (item_j - item_k).abs(),
-            ));
+    for xi in 0..n {
+        let mut column = vec![];
+        for yi in 0..n {
+            let val = (vec1[xi] - vec2[yi]).abs()
+                * (vec1[xi] - vec3[yi]).abs()
+                * (vec3[xi] - vec2[yi]).abs();
+            column.push(val);
             // println!("{} {:?} {:?}\n", i, vec2[i], vec3[i]);
         }
         //println!("{:?}\n\n", row);
-        matrix.push(row)
+        matrix.push(column)
     }
     matrix
 }
@@ -175,15 +175,15 @@ fn recurrence_matrix3interp(e: f32, vec1: &[f32], vec2: &[f32], vec3: &[f32]) ->
         let mut row = vec![];
         let ratio = i as f32 / n as f32;
         let idx_x = i;
-        let x = if ratio < 2.0/3.0 {
+        let x = if ratio < 2.0 / 3.0 {
             vec1[idx_x]
         } else {
-            let adjusted_ratio = (ratio - 2.0/3.0) * 3.0;
+            let adjusted_ratio = (ratio - 2.0 / 3.0) * 3.0;
             vec1[idx_x] * (1.0 - adjusted_ratio) + vec3[idx_x] * adjusted_ratio
         };
         for j in 0..n {
             let idx_y = n - 1 - j;
-            let y = if ratio > 1.0/3.0 {    
+            let y = if ratio > 1.0 / 3.0 {
                 vec3[idx_y]
             } else {
                 vec2[idx_y] * (1.0 - (ratio * 3.0)) + vec3[idx_y] * (ratio * 3.0)
@@ -191,9 +191,8 @@ fn recurrence_matrix3interp(e: f32, vec1: &[f32], vec2: &[f32], vec3: &[f32]) ->
             row.push((x - y).abs())
         }
         matrix.push(row)
-        
     }
-    
+
     // for i in 0..n {
     //     let mut row = vec![];
     //     let ratio = i as f32 / n as f32;
@@ -305,7 +304,7 @@ pub struct App {
     exponent: f32,
     rec_matrix2darray: [[f32; 400]; 400],
     rec_matrix2d: Vec<Vec<f32>>,
-    rec_matrix3d: Vec<Vec<(f32, f32, f32)>>,
+    rec_matrix3d: Vec<Vec<f32>>,
     down_fac: f32,
     up_fac: f32,
     bwmode: u8,
@@ -313,7 +312,6 @@ pub struct App {
     offset_y: i32,
     zoom: f32,
 }
-
 
 impl App {
     fn render(&mut self, args: &RenderArgs) {
@@ -360,38 +358,44 @@ impl App {
                 | Mode::RecurrenceThreeMulti
                 | Mode::RecurrenceRev
                 | Mode::RecurrenceThreeSum => {
-                    let n = (matrix2darray.len() as f32 / (*zoom).max(1.0)).ceil();
-                    let length = n as f64 ;
+                    let n = (matrix3d.len() as f32 / (*zoom).max(1.0)).ceil();
+                    let length = n as f64;
                     let xfac = args.window_size[0] / length;
                     let yfac = args.window_size[1] / length;
 
-                    let to_skip_x = (matrix2darray.len()- n as usize).min(*offset_x as usize) ; 
-                    let to_skip_y = (matrix2darray.len()- n as usize).min(*offset_y as usize) ; 
-                   // println!("to skip {}, offset {}", to_skip, offset); 
+                    let to_skip_x = (matrix3d.len() - n as usize).min(*offset_x as usize);
+                    let to_skip_y = (matrix3d.len() - n as usize).min(*offset_y as usize);
+                    // println!("to skip {}, offset {}", to_skip, offset);
 
-                    matrix2darray.iter().skip(to_skip_x).take(n as usize).enumerate().for_each(|(i, vec)| {
-                        vec.iter().skip(to_skip_y).take(n as usize).enumerate().for_each(|(j, val)| {
-                            let mut value = *val * factor;
-                            if *bwmode == 1 {
-                                value = 1.0 - value;
-                            }
-                            let g = color::alpha(value.powf(exponent));
+                    matrix3d
+                        .iter()
+                        .skip(to_skip_x)
+                        .take(n as usize)
+                        .enumerate()
+                        .for_each(|(i, vec)| {
+                            vec.iter()
+                                .skip(to_skip_y)
+                                .take(n as usize)
+                                .enumerate()
+                                .for_each(|(j, val)| {
+                                    let mut value = *val * factor;
+                                    if *bwmode == 1 {
+                                        value = 1.0 - value;
+                                    }
+                                    let g = color::alpha(value.powf(exponent));
 
-                            //let y = (args.window_size[1] / 2.0) + (80 * filter_idx) as f64;
-                            //                let r = Rectangle::new(g);
-                            let r = rectangle::rectangle_by_corners(
-                                i as f64 * xfac,
-                                j as f64 * yfac,
-                                (i + 1) as f64 * xfac,
-                                (j + 1) as f64 * yfac,
-                            );
-                            rectangle(g, r, c.transform, gl);
+                                    //let y = (args.window_size[1] / 2.0) + (80 * filter_idx) as f64;
+                                    //                let r = Rectangle::new(g);
+                                    let r = rectangle::rectangle_by_corners(
+                                        i as f64 * xfac,
+                                        j as f64 * yfac,
+                                        (i + 1) as f64 * xfac,
+                                        (j + 1) as f64 * yfac,
+                                    );
+                                    rectangle(g, r, c.transform, gl);
+                                })
                         })
-                    })
-                }
-                
-                
-                 /*   Mode::RecurrenceThreeColor
+                } /*   Mode::RecurrenceThreeColor
                   | Mode::RecurrenceThreeMulti
                   | Mode::RecurrenceThreeSum => {
                       let length = matrix3d.len() as f64;
@@ -495,21 +499,27 @@ impl App {
                     &self.filtered_buffer2.buffer,
                     &self.filtered_buffer3.buffer,
                 );
-                recurrence_matrix2square(
+                /*              recurrence_matrix2square(
                     e,
                     &self.filtered_buffer1.buffer,
                     &self.filtered_buffer2.buffer,
                     &mut self.rec_matrix2darray,
                     down_fac,
                     up_fac,
-                );
-            //  &self.filtered_buffer3.buffer,
-                
+                ); */
+                //  self.rec_matrix2d = recurrence_matrix2(
+                //   e,
+                // &self.filtered_buffer1.buffer,
+                //&self.filtered_buffer2.buffer,
+                // &mut self.rec_matrix2darray,
+                //down_fac,
+                //up_fac,
+                //);
+                //  &self.filtered_buffer3.buffer,
             }
         }
     }
 }
-
 
 fn handle_packet(packet: OscPacket) {
     match packet {
@@ -525,7 +535,9 @@ fn handle_packet(packet: OscPacket) {
 
 fn float_osc(p: OscPacket) -> Option<f32> {
     if let OscPacket::Message(msg) = p {
-        msg.args.first().and_then(move |v| rosc::OscType::float(v.clone()))
+        msg.args
+            .first()
+            .and_then(move |v| rosc::OscType::float(v.clone()))
     } else {
         None
     }
@@ -533,12 +545,13 @@ fn float_osc(p: OscPacket) -> Option<f32> {
 
 fn int_osc(p: OscPacket) -> Option<i32> {
     if let OscPacket::Message(msg) = p {
-        msg.args.first().and_then(move |v| rosc::OscType::int(v.clone()))
+        msg.args
+            .first()
+            .and_then(move |v| rosc::OscType::int(v.clone()))
     } else {
         None
     }
 }
-
 
 fn main() {
     let (client, _status) =
@@ -591,9 +604,9 @@ fn main() {
         buffer1: vec![],
         buffer2: vec![],
         buffer3: vec![],
-        filtered_buffer1: FilteredBuffer::new(800, 1),
-        filtered_buffer2: FilteredBuffer::new(800, 1),
-        filtered_buffer3: FilteredBuffer::new(800, 1),
+        filtered_buffer1: FilteredBuffer::new(1000, 1),
+        filtered_buffer2: FilteredBuffer::new(1000, 1),
+        filtered_buffer3: FilteredBuffer::new(1000, 1),
         mode: Mode::Recurrence,
         factor: 1.0,
         exponent: 1.0,
@@ -618,26 +631,24 @@ fn main() {
     println!("Listening to {}", addr);
     let (tx, rx) = mpsc::channel();
 
-
     thread::spawn(move || {
         let mut buf = [0u8; rosc::decoder::MTU];
 
         loop {
-               match sock.recv_from(&mut buf) {
-                    Ok((size, addr)) => {
-                        //println!("Received packet with size {} from: {}", size, addr);
-                        let (_, packet) = rosc::decoder::decode_udp(&buf[..size]).unwrap();
-                        tx.send(packet).unwrap();
-                        //handle_packet(packet);
-                    }   
-                    Err(e) => {
-                        println!("Error receiving from socket: {}", e);
-                        break;
-                    }
+            match sock.recv_from(&mut buf) {
+                Ok((size, addr)) => {
+                    //println!("Received packet with size {} from: {}", size, addr);
+                    let (_, packet) = rosc::decoder::decode_udp(&buf[..size]).unwrap();
+                    tx.send(packet).unwrap();
+                    //handle_packet(packet);
+                }
+                Err(e) => {
+                    println!("Error receiving from socket: {}", e);
+                    break;
                 }
             }
-    }
-    );
+        }
+    });
 
     while let Some(e) = events.next(&mut window) {
         match &e {
@@ -647,7 +658,7 @@ fn main() {
                 "3" => app.mode = Mode::RecurrenceThreeColor,
                 "4" => app.mode = Mode::RecurrenceThreeMulti,
                 "5" => app.mode = Mode::RecurrenceThreeSum,
-                "6" => app.mode = Mode::RecurrenceRev,                
+                "6" => app.mode = Mode::RecurrenceRev,
                 "-" => app.factor = app.factor - 0.1,
                 "+" => app.factor = app.factor + 0.1,
                 "<" => app.exponent = app.exponent - 0.1,
@@ -659,61 +670,61 @@ fn main() {
         }
 
         match rx.try_recv() {
-            Ok(p) => {
-                match p.clone() {
-                    OscPacket::Message(msg) => {
-                        match msg.addr.as_str() {
-                            "/facdown" => {
-                                float_osc(p).map(|f| app.down_fac = f);
-                                ()
-                            },
-                            "/facup" => {
-                                float_osc(p).map(|f| app.up_fac = f);
-                                ()
-                            },
-                            "/factor" => {
-                                float_osc(p).map(|f| app.factor = f);
-                                ()
-                            },
-                            "/exponent" => {
-                                float_osc(p).map(|f| app.exponent = f);
-                                ()
-                            },
-                            "/bwmode" => {
-                                int_osc(p).map(|f| app.bwmode = f as u8);
-                                ()
-                            },
-                            "/offsetx" => {
-                                int_osc(p).map(|f| app.offset_x = f);
-                                ()
-                            },
-                            "/offsety" => {
-                                int_osc(p).map(|f| app.offset_y = f);
-                                ()
-                            },
-                            "/zoom" => {
-                                float_osc(p).map(|f| app.zoom = f);
-                                ()
-                            },
-                            
-                            _ => println!("unkown addr"),
-                        }
-                    }
-                    _ => {
+            Ok(p) => match p.clone() {
+                OscPacket::Message(msg) => match msg.addr.as_str() {
+                    "/facdown" => {
+                        float_osc(p).map(|f| app.down_fac = f);
                         ()
                     }
-                }
-            }
-            _ => ()
+                    "/facup" => {
+                        float_osc(p).map(|f| app.up_fac = f);
+                        ()
+                    }
+                    "/factor" => {
+                        float_osc(p).map(|f| app.factor = f);
+                        ()
+                    }
+                    "/exponent" => {
+                        float_osc(p).map(|f| app.exponent = f);
+                        ()
+                    }
+                    "/bwmode" => {
+                        int_osc(p).map(|f| app.bwmode = f as u8);
+                        ()
+                    }
+                    "/offsetx" => {
+                        int_osc(p).map(|f| app.offset_x = f);
+                        ()
+                    }
+                    "/offsety" => {
+                        int_osc(p).map(|f| app.offset_y = f);
+                        ()
+                    }
+                    "/zoom" => {
+                        float_osc(p).map(|f| app.zoom = f);
+                        ()
+                    }
+
+                    _ => println!("unkown addr"),
+                },
+                _ => (),
+            },
+            _ => (),
         };
-    
 
         if let Some(args) = e.render_args() {
             app.render(&args);
         }
 
         if let Some(args) = e.update_args() {
-            app.update(&args, &mut consumer_1, &mut consumer_2, &mut consumer_3, app.down_fac, app.up_fac);
+            app.update(
+                &args,
+                &mut consumer_1,
+                &mut consumer_2,
+                &mut consumer_3,
+                app.down_fac,
+                app.up_fac,
+            );
         }
     }
 }

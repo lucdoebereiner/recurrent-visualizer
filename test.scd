@@ -1,11 +1,13 @@
 Server.default.options.blockSize = 1
-Server.default.options.numOutputBusChannels = 3
+Server.default.options.numOutputBusChannels = 6
 Server.default.reboot
+
+s.meter
 
 
 { [SinOsc.ar(1321), SinOsc.ar(1321), SinOsc.ar(1321)] }.play
 
-{ [SinOsc.ar(132), SinOsc.ar(133), SinOsc.ar(131)] }.play
+{ [SinOsc.ar(192), SinOsc.ar(1333), SinOsc.ar(800)] }.play
 
 
 
@@ -68,10 +70,11 @@ Server.default.reboot
 b = NetAddr.new("127.0.0.1", 8000);    // create the NetAddr
 b.sendMsg("/facdown", 0.95)
 b.sendMsg("/facup", 0.95)
-b.sendMsg("/factor", 1)
-b.sendMsg("/exponent", 0.5)
-b.sendMsg("/bwmode", 1)
-b.sendMsg("/zoom", 2.0)
+b.sendMsg("/factor", 2)
+b.sendMsg("/exponent", 1.25)
+b.sendMsg("/bwmode", 0)
+b.sendMsg("/zoom", 0.0)
 b.sendMsg("/offsety", 3)
+
 
 
