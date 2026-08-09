@@ -1,0 +1,70 @@
+name: release-macos
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # macos-14 is Apple Silicon, so this builds natively for arm64.
+    # M2 and M4 are both arm64, one binary covers them.
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustc -vV
+          cargo -vV
+
+      # No JACK needed to build: the jack crate's default "dynamic_loading"
+      # feature dlopen()s libjack.0.dylib at run time instead of linking it.
+      - name: Build
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Package
+        run: |
+          BIN=target/aarch64-apple-darwin/release/visualizer-piston
+          strip -x "$BIN"
+          codesign --force --sign - "$BIN"
+          file "$BIN"
+          otool -L "$BIN"
+          mkdir -p dist
+          cp "$BIN" README.md dist/
+          tar -czf recurrent-visualizer-macos-arm64.tar.gz -C dist .
+          shasum -a 256 recurrent-visualizer-macos-arm64.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recurrent-visualizer-macos-arm64
+          path: recurrent-visualizer-macos-arm64.tar.gz
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            recurrent-visualizer-macos-arm64.tar.gz \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "$(cat <<'EOF'
+          macOS build for Apple Silicon (arm64) — covers M1/M2/M3/M4.
+
+          Requires JACK to be installed; the binary loads `libjack.0.dylib` at
+          run time (`brew install jack`).
+
+              tar xzf recurrent-visualizer-macos-arm64.tar.gz
+              xattr -d com.apple.quarantine visualizer-piston
+              ./visualizer-piston            # -f for fullscreen, F11 toggles
+
+          The `xattr` step is needed because the binary is unsigned by an Apple
+          developer ID; macOS quarantines anything downloaded from a browser.
+          EOF
+          )"
