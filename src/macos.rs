@@ -2,6 +2,33 @@
 
 use std::os::raw::c_void;
 
+/// Hides the menu bar and the Dock outright.
+///
+/// winit's simple fullscreen sets only the *auto* hide options, so the menu bar
+/// slides back in whenever the pointer nears the top of the screen. For a
+/// projected visualisation it should stay gone.
+///
+/// Call this after entering simple fullscreen: winit saves the presentation
+/// options before it changes them, and restores that saved value on exit, so
+/// overriding afterwards does not leak into windowed mode.
+pub fn hide_menu_bar_and_dock() {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    // NSApplicationPresentationOptions. HideMenuBar is only a legal combination
+    // together with HideDock; on its own it raises an exception.
+    const HIDE_DOCK: u64 = 1 << 1;
+    const HIDE_MENU_BAR: u64 = 1 << 3;
+
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        if app.is_null() {
+            return;
+        }
+        let _: () = msg_send![app, setPresentationOptions: HIDE_DOCK | HIDE_MENU_BAR];
+    }
+}
+
 /// Stops the green titlebar button from offering *native* fullscreen.
 ///
 /// Native fullscreen moves the window onto a Space of its own, which is where

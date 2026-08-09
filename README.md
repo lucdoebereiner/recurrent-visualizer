@@ -149,6 +149,11 @@ green titlebar button is also stopped from offering native fullscreen
 (`NSWindowCollectionBehaviorFullScreenNone`), so it zooms the window rather
 than opening a Space. No route into a Space is left.
 
+winit's simple fullscreen only *auto*-hides the menu bar and Dock, so they slide
+back in when the pointer nears the screen edge. Both are hidden outright
+instead (`NSApplicationPresentationHideDock | HideMenuBar`), and restored when
+fullscreen is left.
+
 Two earlier countermeasures remain in place: the GL context is re-attached when
 focus returns, and App Nap is disabled via `NSProcessInfo
 beginActivityWithOptions` so macOS does not suspend the app's timers once it

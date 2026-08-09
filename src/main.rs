@@ -454,7 +454,13 @@ fn set_fullscreen(window: &Window, on: bool) {
     #[cfg(target_os = "macos")]
     {
         use glutin::platform::macos::WindowExtMacOS;
-        if !window.ctx.window().set_simple_fullscreen(on) {
+        if window.ctx.window().set_simple_fullscreen(on) {
+            if on {
+                // winit only asks for auto-hide, which lets the menu bar slide
+                // back in on pointer approach.
+                macos::hide_menu_bar_and_dock();
+            }
+        } else {
             eprintln!("could not toggle fullscreen; is the window in native fullscreen?");
         }
     }
