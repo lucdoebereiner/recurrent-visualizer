@@ -601,6 +601,12 @@ fn main() {
     settings.ups = cfg.fps;
     let mut events = Events::new(settings);
     let mut last_report = Instant::now();
+    // glutin_window re-attaches the GL context only on Resized, and drops
+    // ScaleFactorChanged outright, so moving the window to a display with a
+    // different scale factor leaves the drawable at its old size: piston's
+    // viewport follows the window, the framebuffer does not, and the picture
+    // ends up in a corner with black margins. Track the size ourselves.
+    let mut last_size = window.ctx.window().inner_size();
 
     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), OSC_PORT);
     let sock = UdpSocket::bind(addr).unwrap();
@@ -635,6 +641,8 @@ fn main() {
             if args.state == ButtonState::Press && toggle {
                 is_fullscreen = !is_fullscreen;
                 set_fullscreen(&window, is_fullscreen);
+                last_size = window.ctx.window().inner_size();
+                window.ctx.resize(last_size);
             }
         }
 
@@ -698,6 +706,11 @@ fn main() {
         }
 
         if let Some(args) = e.render_args() {
+            let size = window.ctx.window().inner_size();
+            if size != last_size {
+                window.ctx.resize(size);
+                last_size = size;
+            }
             app.render(&args);
         }
 

@@ -143,6 +143,14 @@ there first. Either drag the window across and press `F`, or say so at startup:
 `--display` is 1-based and positions the window on that display before going
 fullscreen. This works the same on Linux.
 
+The display's resolution does not need to match anything: the plot is scaled to
+whatever the window currently is, so a lower-resolution projector simply gets
+fewer pixels. (`glutin_window` re-attaches the GL context only on `Resized` and
+drops `ScaleFactorChanged` entirely, so moving between displays of different
+scale factors used to leave the framebuffer at its old size and the picture in a
+corner with black margins on the right and bottom. The window size is now
+tracked directly and the context re-attached whenever it changes.)
+
 ### Fullscreen
 
 Use `-f` or the `F` key. Both give *borderless* fullscreen, which stays on the
