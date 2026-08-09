@@ -137,12 +137,28 @@ At startup the app prints what it settled on:
 Use `-f` or the `F` key. Both give *borderless* fullscreen, which stays on the
 current Space.
 
-Avoid the green titlebar button: that is macOS **native** fullscreen, which
-moves the window to a Space of its own. Switching away with Cmd-Tab and back
-has been observed to leave the image frozen, because the window comes back with
-a stale drawable and no resize event fires to make glutin re-attach the
-context. The app now re-attaches on regaining focus, which should recover it,
-but borderless fullscreen avoids the situation altogether.
+The green titlebar button gives macOS **native** fullscreen, which moves the
+window to a Space of its own; borderless keeps it on the current one.
+
+**Known issue:** in fullscreen, giving focus to another window has been
+reported to freeze the image, while a normal window keeps updating. Two
+countermeasures are in: the GL context is re-attached when focus returns, and
+App Nap is disabled via `NSProcessInfo beginActivityWithOptions` so that macOS
+does not suspend the app's timers once it stops being frontmost. Neither has
+been confirmed on hardware — there is no Mac in the loop here.
+
+If it still freezes, run with `--stats` and watch the once-a-second line while
+it happens:
+
+    stats: 60.0 fps, 48000 samples/s
+
+- **fps drops to 0** — the render loop is being suspended by the OS.
+- **fps holds, samples/s drops to 0** — the CoreAudio stream stopped, so the
+  plot has nothing new to draw.
+- **both hold steady but the picture is static** — rendering is fine and the
+  frames are not reaching the screen.
+
+Those three point at different fixes, so the number is worth capturing.
 
 ### Gatekeeper and microphone access
 
@@ -164,6 +180,7 @@ terminal application you launch it from.
     --device NAME      input device, substring match (CoreAudio only)
     --channels A,B,C   device channels to plot, 1-based (default 1,2,3)
     --list-devices     list available inputs and exit
+    --stats            print frame and audio rates once a second
 
 ## Keys
 
