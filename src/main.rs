@@ -1,3 +1,5 @@
+mod audio;
+
 use glutin::window::Fullscreen;
 use glutin_window::GlutinWindow as Window;
 use graphics::{clear, color, Image};
@@ -9,7 +11,7 @@ use piston::input::{Button, ButtonState, Event, Input, Key};
 use piston::input::{RenderArgs, RenderEvent, UpdateEvent};
 use piston::window::WindowSettings;
 use rayon::prelude::*;
-use ringbuf::{Consumer, Producer, RingBuffer};
+use ringbuf::{Consumer, RingBuffer};
 use rosc::OscPacket;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::sync::mpsc;
@@ -46,6 +48,7 @@ struct Config {
     fullscreen: bool,
     fps: u64,
     length: usize,
+    device: Option<String>,
 }
 
 impl Config {
@@ -54,6 +57,7 @@ impl Config {
             fullscreen: false,
             fps: 60,
             length: 1000,
+            device: None,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -68,13 +72,20 @@ impl Config {
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(cfg.length);
                 }
+                "--device" => cfg.device = args.next(),
+                "--list-devices" => {
+                    audio::list_inputs();
+                    std::process::exit(0);
+                }
                 "-h" | "--help" => {
                     println!(
-                        "visualizer [--fullscreen] [--fps N] [--length N]\n\
+                        "visualizer [--fullscreen] [--fps N] [--length N] [--device NAME]\n\
                          \n\
                            --fullscreen, -f   start borderless fullscreen (F11 toggles, Esc quits)\n\
                            --fps N            frame/update rate (default 60)\n\
                            --length N         recurrence matrix side length (default 1000)\n\
+                           --device NAME      input device, substring match (CoreAudio only)\n\
+                           --list-devices     list available inputs and exit\n\
                          \n\
                          OSC on 127.0.0.1:{}: /factor f, /exponent f, /bwmode i,\n\
                          /offsetx i, /offsety i, /zoom f, /fullscreen i",
@@ -94,37 +105,6 @@ impl Config {
         }
         cfg.fps = cfg.fps.max(1);
         cfg
-    }
-}
-
-struct JackProc {
-    in_1: jack::Port<jack::AudioIn>,
-    in_2: jack::Port<jack::AudioIn>,
-    in_3: jack::Port<jack::AudioIn>,
-    producer_1: Producer<f32>,
-    producer_2: Producer<f32>,
-    producer_3: Producer<f32>,
-}
-
-impl jack::ProcessHandler for JackProc {
-    fn process(&mut self, _: &jack::Client, ps: &jack::ProcessScope) -> jack::Control {
-        let mut got_err = false;
-        for (port, producer) in [
-            (&self.in_1, &mut self.producer_1),
-            (&self.in_2, &mut self.producer_2),
-            (&self.in_3, &mut self.producer_3),
-        ] {
-            // push_slice writes as much as fits in one memcpy instead of
-            // pushing sample by sample.
-            let samples = port.as_slice(ps);
-            if producer.push_slice(samples) != samples.len() {
-                got_err = true;
-            }
-        }
-        if got_err {
-            println!("ring buffer overrun");
-        }
-        jack::Control::Continue
     }
 }
 
@@ -224,7 +204,7 @@ pub struct App {
     texture: Texture,
     /// Scratch RGBA8 buffer, `length * length * 4` bytes.
     pixels: Vec<u8>,
-    /// Scratch for draining the jack ring buffers.
+    /// Scratch for draining the audio ring buffers.
     scratch: Vec<f32>,
     length: usize,
     filtered_buffer1: FilteredBuffer,
@@ -420,15 +400,16 @@ fn build_window(cfg: &Config, opengl: OpenGL) -> Window {
     let err = first.err().unwrap();
 
     // Respect an explicit choice rather than overriding it.
-    if std::env::var_os("WINIT_UNIX_BACKEND").is_some() {
-        panic!("could not create window: {}", err);
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WINIT_UNIX_BACKEND").is_none() {
+        eprintln!("window creation failed ({}), retrying on X11/XWayland", err);
+        std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+        return settings()
+            .build::<Window>()
+            .unwrap_or_else(|e| panic!("could not create window on X11 either: {}", e));
     }
 
-    eprintln!("window creation failed ({}), retrying on X11/XWayland", err);
-    std::env::set_var("WINIT_UNIX_BACKEND", "x11");
-    settings()
-        .build::<Window>()
-        .unwrap_or_else(|e| panic!("could not create window on X11 either: {}", e))
+    panic!("could not create window: {}", err);
 }
 
 fn set_fullscreen(window: &Window, on: bool) {
@@ -442,19 +423,6 @@ fn set_fullscreen(window: &Window, on: bool) {
 fn main() {
     let cfg = Config::from_args();
 
-    let (client, _status) =
-        jack::Client::new("visualizer", jack::ClientOptions::NO_START_SERVER).unwrap();
-
-    let in_1 = client
-        .register_port("vis_in_1", jack::AudioIn::default())
-        .unwrap();
-    let in_2 = client
-        .register_port("vis_in_2", jack::AudioIn::default())
-        .unwrap();
-    let in_3 = client
-        .register_port("vis_in_3", jack::AudioIn::default())
-        .unwrap();
-
     let ring_buffer_1 = RingBuffer::<f32>::new(FRAME_SIZE * 10);
     let ring_buffer_2 = RingBuffer::<f32>::new(FRAME_SIZE * 10);
     let ring_buffer_3 = RingBuffer::<f32>::new(FRAME_SIZE * 10);
@@ -463,16 +431,17 @@ fn main() {
     let (producer_2, mut consumer_2) = ring_buffer_2.split();
     let (producer_3, mut consumer_3) = ring_buffer_3.split();
 
-    let process = JackProc {
-        in_1,
-        in_2,
-        in_3,
-        producer_1,
-        producer_2,
-        producer_3,
+    // Held for the lifetime of the program; dropping it stops capture.
+    let _audio: audio::Audio = match audio::start(
+        [producer_1, producer_2, producer_3],
+        cfg.device.as_deref(),
+    ) {
+        Ok(audio) => audio,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
     };
-
-    let _active_client = client.activate_async((), process).unwrap();
 
     // Change this to OpenGL::V2_1 if not working.
     let opengl = OpenGL::V3_2;

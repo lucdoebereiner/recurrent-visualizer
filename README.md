@@ -1,7 +1,13 @@
 # recurrent-visualizer
 
-Recurrence plot of three JACK inputs (`vis_in_1..3`), rendered as
+Recurrence plot of three audio channels, rendered as
 `|in1[x]-in2[y]| * |in1[x]-in3[y]| * |in3[x]-in2[y]|`.
+
+Audio comes from JACK on Linux (ports `vis_in_1..3`) and from CoreAudio on
+macOS, where no JACK install is needed. Pick a macOS input with `--device`;
+`--list-devices` shows what is available. A device with fewer than three
+channels still draws, reusing its last channel for the missing ones, so for a
+real plot use a 3+ channel interface or a virtual device such as BlackHole.
 
     cargo build --release
     ./target/release/visualizer-piston
@@ -11,6 +17,8 @@ Recurrence plot of three JACK inputs (`vis_in_1..3`), rendered as
     -f, --fullscreen   start borderless fullscreen
     --fps N            frame rate (default 60)
     --length N         matrix side length (default 1000, max 4096)
+    --device NAME      input device, substring match (CoreAudio only)
+    --list-devices     list available inputs and exit
 
 ## Keys
 

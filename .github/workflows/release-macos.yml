@@ -26,8 +26,8 @@ jobs:
           rustc -vV
           cargo -vV
 
-      # No JACK needed to build: the jack crate's default "dynamic_loading"
-      # feature dlopen()s libjack.0.dylib at run time instead of linking it.
+      # No JACK anywhere on macOS: Cargo.toml selects cpal/CoreAudio for
+      # non-Linux targets.
       - name: Build
         run: cargo build --release --target aarch64-apple-darwin
 
@@ -59,8 +59,9 @@ jobs:
             --notes "$(cat <<'EOF'
           macOS build for Apple Silicon (arm64) — covers M1/M2/M3/M4.
 
-          Requires JACK to be installed; the binary loads `libjack.0.dylib` at
-          run time (`brew install jack`).
+          Uses CoreAudio, so no JACK install is needed. Choose an input with
+          `--device NAME`; `--list-devices` lists them. Three channels are
+          needed for a real plot, e.g. an audio interface or BlackHole.
 
               tar xzf recurrent-visualizer-macos-arm64.tar.gz
               xattr -d com.apple.quarantine visualizer-piston

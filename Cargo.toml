@@ -12,10 +12,18 @@ pistoncore-glutin_window = "0.69"
 piston2d-opengl_graphics = "0.78"
 # Same glutin that glutin_window uses, for the runtime fullscreen toggle.
 glutin = "0.26"
-jack = "0.11.4"
 ringbuf = "0.2"
 rosc = "~0.10"
 rayon = "1"
+
+# Audio input differs per platform: JACK where it is the norm, CoreAudio (via
+# cpal) elsewhere. macOS ships no JACK, so requiring it there would mean a
+# third party install just to get sound in.
+[target.'cfg(target_os = "linux")'.dependencies]
+jack = "0.11.4"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+cpal = "0.15"
 
 [profile.release]
 opt-level = 3
