@@ -398,6 +398,39 @@ fn int_osc(p: OscPacket) -> Option<i32> {
     }
 }
 
+/// Opens the window, falling back to X11/XWayland if the Wayland backend
+/// cannot start.
+///
+/// `pistoncore-glutin_window` 0.69 is the newest release and pins glutin 0.26,
+/// whose EGL path fails against current Mesa with `eglInitialize failed` (it
+/// fails under `LIBGL_ALWAYS_SOFTWARE=1` too, so it is not a driver issue).
+/// XWayland works fine, so retry there instead of refusing to start.
+fn build_window(cfg: &Config, opengl: OpenGL) -> Window {
+    let settings = || {
+        WindowSettings::new("visualizer", [1024, 768])
+            .graphics_api(opengl)
+            .fullscreen(cfg.fullscreen)
+            .exit_on_esc(true)
+    };
+
+    let first = settings().build::<Window>();
+    if let Ok(window) = first {
+        return window;
+    }
+    let err = first.err().unwrap();
+
+    // Respect an explicit choice rather than overriding it.
+    if std::env::var_os("WINIT_UNIX_BACKEND").is_some() {
+        panic!("could not create window: {}", err);
+    }
+
+    eprintln!("window creation failed ({}), retrying on X11/XWayland", err);
+    std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+    settings()
+        .build::<Window>()
+        .unwrap_or_else(|e| panic!("could not create window on X11 either: {}", e))
+}
+
 fn set_fullscreen(window: &Window, on: bool) {
     window.ctx.window().set_fullscreen(if on {
         Some(Fullscreen::Borderless(None))
@@ -444,12 +477,7 @@ fn main() {
     // Change this to OpenGL::V2_1 if not working.
     let opengl = OpenGL::V3_2;
 
-    let mut window: Window = WindowSettings::new("visualizer", [1024, 768])
-        .graphics_api(opengl)
-        .fullscreen(cfg.fullscreen)
-        .exit_on_esc(true)
-        .build()
-        .unwrap();
+    let mut window = build_window(&cfg, opengl);
 
     let mut is_fullscreen = cfg.fullscreen;
 

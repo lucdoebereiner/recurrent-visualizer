@@ -29,5 +29,7 @@ Recurrence plot of three JACK inputs (`vis_in_1..3`), rendered as
 
 ## Note
 
-If the window fails with `eglInitialize failed`, run with
-`WINIT_UNIX_BACKEND=x11`.
+glutin 0.26, which `pistoncore-glutin_window` 0.69 pins and which is the newest
+release, cannot initialise EGL on current Mesa/Wayland. The app detects this and
+reopens the window on X11/XWayland by itself, printing one line when it does.
+Set `WINIT_UNIX_BACKEND` yourself to pick a backend and skip the fallback.
