@@ -21,7 +21,7 @@ use rosc::OscPacket;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const FRAME_SIZE: usize = 1024;
 const OSC_PORT: u16 = 8000;
@@ -517,38 +517,35 @@ fn target_monitor(window: &Window, display: Option<usize>) -> Option<MonitorHand
 /// Windowed geometry, remembered so leaving fullscreen can restore it.
 type SavedGeometry = Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>;
 
+/// Applies fullscreen and returns the geometry it asked for, so the caller can
+/// check that it actually took.
 fn set_fullscreen(
     window: &Window,
     on: bool,
     display: Option<usize>,
     saved: &mut SavedGeometry,
-) {
+) -> Option<(PhysicalPosition<i32>, PhysicalSize<u32>)> {
     // macOS gets fullscreen by hand rather than through winit.
     //
     // `Fullscreen::Borderless` routes through `toggleFullScreen:` and allocates
-    // a Space, which is what froze the picture on losing focus.
-    // `set_simple_fullscreen` avoids the Space but sizes to `ns_window.screen()`
-    // — whichever screen it believes the window is on at that moment, which
-    // races with having just moved the window to another display. And because
-    // `glutin_window` discards `ScaleFactorChanged`, `inner_size()` can stay
-    // stale afterwards, so the drawable never catches up and the picture sits
-    // in a corner with black to the right and below.
+    // a Space, which is what froze the picture on losing focus, and
+    // `set_simple_fullscreen` sizes to whichever screen it believes the window
+    // is on at that instant.
     //
-    // Sizing explicitly to the monitor we picked sidesteps all three.
+    // Doing it by hand is not enough on its own either: `set_outer_position`,
+    // `set_inner_size` and `set_decorations` are all applied *asynchronously*
+    // on the main run loop, and both geometry calls convert through the
+    // window's scale factor as it is when they are called. Aiming a 1x external
+    // display while the window still sits on a 2x internal one therefore
+    // halves the request. That is why this used to work only sometimes. The
+    // caller re-applies the returned geometry until the window reports it.
     #[cfg(target_os = "macos")]
     {
         use glutin::platform::macos::WindowExtMacOS;
         let w = window.ctx.window();
 
         if on {
-            let monitor = match target_monitor(window, display) {
-                Some(monitor) => monitor,
-                None => {
-                    eprintln!("no display to go fullscreen on");
-                    return;
-                }
-            };
-
+            let monitor = target_monitor(window, display)?;
             if saved.is_none() {
                 *saved = Some((
                     w.outer_position().unwrap_or(PhysicalPosition::new(0, 0)),
@@ -578,15 +575,18 @@ fn set_fullscreen(
             macos::activate();
             macos::hide_menu_bar_and_dock();
             macos::set_window_level(w.ns_window(), macos::LEVEL_ABOVE_MENU_BAR);
-        } else {
-            macos::set_window_level(w.ns_window(), macos::LEVEL_NORMAL);
-            macos::restore_presentation_options();
-            w.set_decorations(true);
-            if let Some((position, size)) = saved.take() {
-                w.set_outer_position(position);
-                w.set_inner_size(size);
-            }
+
+            return Some((position, size));
         }
+
+        macos::set_window_level(w.ns_window(), macos::LEVEL_NORMAL);
+        macos::restore_presentation_options();
+        w.set_decorations(true);
+        if let Some((position, size)) = saved.take() {
+            w.set_outer_position(position);
+            w.set_inner_size(size);
+        }
+        return None;
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -598,6 +598,60 @@ fn set_fullscreen(
             None
         };
         window.ctx.window().set_fullscreen(fullscreen);
+        None
+    }
+}
+
+/// Keeps re-applying the requested fullscreen geometry until the window
+/// reports it, because the macOS calls that set it are asynchronous and
+/// scale-factor dependent (see `set_fullscreen`). Gives up after a few seconds
+/// and says what it got, rather than retrying forever.
+struct FullscreenEnforcer {
+    target: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+    deadline: Instant,
+    settled: bool,
+}
+
+impl FullscreenEnforcer {
+    fn new() -> Self {
+        FullscreenEnforcer {
+            target: None,
+            deadline: Instant::now(),
+            settled: true,
+        }
+    }
+
+    fn aim(&mut self, target: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>) {
+        self.target = target;
+        self.settled = target.is_none();
+        self.deadline = Instant::now() + Duration::from_secs(5);
+    }
+
+    fn poll(&mut self, window: &Window) {
+        let (position, size) = match self.target {
+            Some(target) if !self.settled => target,
+            _ => return,
+        };
+
+        let actual = window.ctx.window().inner_size();
+        if actual == size {
+            self.settled = true;
+            return;
+        }
+
+        if Instant::now() >= self.deadline {
+            eprintln!(
+                "fullscreen geometry never settled: wanted {}x{}, window reports {}x{}",
+                size.width, size.height, actual.width, actual.height
+            );
+            self.settled = true;
+            return;
+        }
+
+        // The scale factor is read live, so once the window has actually landed
+        // on the target display this request converts correctly and sticks.
+        window.ctx.window().set_outer_position(position);
+        window.ctx.window().set_inner_size(size);
     }
 }
 
@@ -641,7 +695,9 @@ fn main() {
     // Must happen before going fullscreen: fullscreen applies to whichever
     // display the window is currently on.
     if let Some(index) = cfg.display {
-        place_on_display(&window, index);
+        if !cfg.fullscreen {
+            place_on_display(&window, index);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -651,8 +707,9 @@ fn main() {
     });
 
     let mut saved_geometry: SavedGeometry = None;
+    let mut enforcer = FullscreenEnforcer::new();
     if cfg.fullscreen {
-        set_fullscreen(&window, true, cfg.display, &mut saved_geometry);
+        enforcer.aim(set_fullscreen(&window, true, cfg.display, &mut saved_geometry));
     }
 
     let mut is_fullscreen = cfg.fullscreen;
@@ -705,7 +762,12 @@ fn main() {
             );
             if args.state == ButtonState::Press && toggle {
                 is_fullscreen = !is_fullscreen;
-                set_fullscreen(&window, is_fullscreen, cfg.display, &mut saved_geometry);
+                enforcer.aim(set_fullscreen(
+                    &window,
+                    is_fullscreen,
+                    cfg.display,
+                    &mut saved_geometry,
+                ));
                 last_size = window.ctx.window().inner_size();
                 window.ctx.resize(last_size);
             }
@@ -762,7 +824,12 @@ fn main() {
                     "/fullscreen" => {
                         if let Some(f) = int_osc(p) {
                             is_fullscreen = f != 0;
-                            set_fullscreen(&window, is_fullscreen, cfg.display, &mut saved_geometry);
+                            enforcer.aim(set_fullscreen(
+                                &window,
+                                is_fullscreen,
+                                cfg.display,
+                                &mut saved_geometry,
+                            ));
                         }
                     }
                     addr => println!("unknown addr {}", addr),
@@ -771,6 +838,7 @@ fn main() {
         }
 
         if let Some(args) = e.render_args() {
+            enforcer.poll(&window);
             let size = window.ctx.window().inner_size();
             if size != last_size {
                 window.ctx.resize(size);
