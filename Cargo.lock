@@ -1941,6 +1941,7 @@ dependencies = [
  "cpal",
  "glutin",
  "jack",
+ "objc",
  "piston",
  "piston2d-graphics",
  "piston2d-opengl_graphics",

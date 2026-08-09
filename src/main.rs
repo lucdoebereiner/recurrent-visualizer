@@ -1,4 +1,6 @@
 mod audio;
+#[cfg(target_os = "macos")]
+mod macos;
 
 use glutin::window::Fullscreen;
 use glutin_window::GlutinWindow as Window;
@@ -16,6 +18,7 @@ use rosc::OscPacket;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Instant;
 
 const FRAME_SIZE: usize = 1024;
 const OSC_PORT: u16 = 8000;
@@ -50,6 +53,7 @@ struct Config {
     length: usize,
     device: Option<String>,
     channels: audio::ChannelMap,
+    stats: bool,
 }
 
 impl Config {
@@ -60,6 +64,7 @@ impl Config {
             length: 1000,
             device: None,
             channels: None,
+            stats: false,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -75,6 +80,7 @@ impl Config {
                         .unwrap_or(cfg.length);
                 }
                 "--device" => cfg.device = args.next(),
+                "--stats" => cfg.stats = true,
                 "--channels" => {
                     let raw = args.next().unwrap_or_default();
                     match audio::parse_channels(&raw) {
@@ -103,6 +109,7 @@ impl Config {
                            --device NAME      input device, substring match (CoreAudio only)\n\
                            --channels A,B,C   device channels to plot, 1-based (default 1,2,3)\n\
                            --list-devices     list available inputs and exit\n\
+                           --stats            print frame and audio rates once a second\n\
                          \n\
                          OSC on 127.0.0.1:{}: /factor f, /exponent f, /bwmode i,\n\
                          /offsetx i, /offsety i, /zoom f, /fullscreen i",
@@ -236,6 +243,9 @@ pub struct App {
     offset_x: i32,
     offset_y: i32,
     zoom: f32,
+    /// Diagnostics: frames drawn and samples captured since the last report.
+    frames: u64,
+    samples: u64,
 }
 
 impl App {
@@ -275,6 +285,8 @@ impl App {
             offset_x: 0,
             offset_y: 0,
             zoom: 1.0,
+            frames: 0,
+            samples: 0,
         };
         app.rebuild_lut();
         app
@@ -302,6 +314,7 @@ impl App {
     }
 
     fn render(&mut self, args: &RenderArgs) {
+        self.frames += 1;
         let ready = self.filtered_buffer1.is_full()
             && self.filtered_buffer2.is_full()
             && self.filtered_buffer3.is_full();
@@ -358,21 +371,23 @@ impl App {
         consumer2: &mut Consumer<f32>,
         consumer3: &mut Consumer<f32>,
     ) {
-        drain(consumer1, &mut self.scratch, &mut self.filtered_buffer1);
+        self.samples += drain(consumer1, &mut self.scratch, &mut self.filtered_buffer1);
         drain(consumer2, &mut self.scratch, &mut self.filtered_buffer2);
         drain(consumer3, &mut self.scratch, &mut self.filtered_buffer3);
     }
 }
 
-fn drain(consumer: &mut Consumer<f32>, scratch: &mut Vec<f32>, target: &mut FilteredBuffer) {
+/// Returns how many samples were moved, for the `--stats` report.
+fn drain(consumer: &mut Consumer<f32>, scratch: &mut Vec<f32>, target: &mut FilteredBuffer) -> u64 {
     let available = consumer.len();
     if available == 0 {
-        return;
+        return 0;
     }
     scratch.clear();
     scratch.resize(available, 0.0);
     let got = consumer.pop_slice(&mut scratch[..]);
     target.input(&scratch[..got]);
+    got as u64
 }
 
 fn float_osc(p: OscPacket) -> Option<f32> {
@@ -440,6 +455,9 @@ fn set_fullscreen(window: &Window, on: bool) {
 fn main() {
     let cfg = Config::from_args();
 
+    #[cfg(target_os = "macos")]
+    macos::disable_app_nap();
+
     let ring_buffer_1 = RingBuffer::<f32>::new(FRAME_SIZE * 10);
     let ring_buffer_2 = RingBuffer::<f32>::new(FRAME_SIZE * 10);
     let ring_buffer_3 = RingBuffer::<f32>::new(FRAME_SIZE * 10);
@@ -476,6 +494,7 @@ fn main() {
     // faster than we draw (the default 120 ups did 4x the necessary work).
     settings.ups = cfg.fps;
     let mut events = Events::new(settings);
+    let mut last_report = Instant::now();
 
     let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), OSC_PORT);
     let sock = UdpSocket::bind(addr).unwrap();
@@ -561,6 +580,21 @@ fn main() {
 
         if e.update_args().is_some() {
             app.update(&mut consumer_1, &mut consumer_2, &mut consumer_3);
+        }
+
+        if cfg.stats {
+            let elapsed = last_report.elapsed();
+            if elapsed.as_secs() >= 1 {
+                let secs = elapsed.as_secs_f64();
+                println!(
+                    "stats: {:.1} fps, {:.0} samples/s",
+                    app.frames as f64 / secs,
+                    app.samples as f64 / secs
+                );
+                app.frames = 0;
+                app.samples = 0;
+                last_report = Instant::now();
+            }
         }
     }
 }
