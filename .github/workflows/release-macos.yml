@@ -60,8 +60,10 @@ jobs:
           macOS build for Apple Silicon (arm64) — covers M1/M2/M3/M4.
 
           Uses CoreAudio, so no JACK install is needed. Choose an input with
-          `--device NAME`; `--list-devices` lists them. Three channels are
-          needed for a real plot, e.g. an audio interface or BlackHole.
+          `--device NAME` and map its channels with `--channels A,B,C` (1-based,
+          default 1,2,3); `--list-devices` lists inputs and their channel counts.
+
+              ./visualizer-piston --device BlackHole --channels 4,5,6 -f
 
               tar xzf recurrent-visualizer-macos-arm64.tar.gz
               xattr -d com.apple.quarantine visualizer-piston

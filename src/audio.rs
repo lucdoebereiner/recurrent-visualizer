@@ -9,11 +9,46 @@ use ringbuf::Producer;
 /// One producer per visualised channel.
 pub type Producers = [Producer<f32>; 3];
 
+/// Which device channels feed the three plot inputs, as 0-based indices.
+/// `None` means "the first three".
+pub type ChannelMap = Option<[usize; 3]>;
+
+/// Parses a `--channels 4,5,6` argument into 0-based indices.
+pub fn parse_channels(s: &str) -> Option<[usize; 3]> {
+    let parsed: Option<Vec<usize>> = s.split(',').map(|p| p.trim().parse().ok()).collect();
+    let parsed = parsed?;
+    if parsed.len() != 3 || parsed.iter().any(|&c| c == 0) {
+        return None;
+    }
+    Some([parsed[0] - 1, parsed[1] - 1, parsed[2] - 1])
+}
+
 #[cfg(target_os = "linux")]
 pub use self::jack_backend::{list_inputs, start, Audio};
 
 #[cfg(not(target_os = "linux"))]
 pub use self::cpal_backend::{list_inputs, start, Audio};
+
+#[cfg(test)]
+mod tests {
+    use super::parse_channels;
+
+    #[test]
+    fn parses_one_based_triples() {
+        assert_eq!(parse_channels("1,2,3"), Some([0, 1, 2]));
+        assert_eq!(parse_channels("4,5,6"), Some([3, 4, 5]));
+        assert_eq!(parse_channels(" 4 , 5 , 6 "), Some([3, 4, 5]));
+        // Repeats are legitimate: plotting one channel against itself.
+        assert_eq!(parse_channels("2,2,7"), Some([1, 1, 6]));
+    }
+
+    #[test]
+    fn rejects_malformed_input() {
+        for bad in ["", "1,2", "1,2,3,4", "0,1,2", "a,b,c", "1;2;3", "-1,2,3", "1,,3"] {
+            assert_eq!(parse_channels(bad), None, "{:?} should be rejected", bad);
+        }
+    }
+}
 
 #[cfg(target_os = "linux")]
 mod jack_backend {
@@ -55,9 +90,15 @@ mod jack_backend {
         }
     }
 
-    pub fn start(producers: Producers, device: Option<&str>) -> Result<Audio, String> {
-        if device.is_some() {
-            eprintln!("--device is ignored under JACK; connect the vis_in_* ports instead");
+    pub fn start(
+        producers: Producers,
+        device: Option<&str>,
+        channels: super::ChannelMap,
+    ) -> Result<Audio, String> {
+        if device.is_some() || channels.is_some() {
+            eprintln!(
+                "--device/--channels are ignored under JACK; patch the vis_in_* ports instead"
+            );
         }
 
         let (client, _status) =
@@ -119,7 +160,11 @@ mod cpal_backend {
         }
     }
 
-    pub fn start(producers: Producers, device: Option<&str>) -> Result<Audio, String> {
+    pub fn start(
+        producers: Producers,
+        device: Option<&str>,
+        channel_map: super::ChannelMap,
+    ) -> Result<Audio, String> {
         let host = cpal::default_host();
 
         let device = match device {
@@ -149,14 +194,45 @@ mod cpal_backend {
             "audio input: {} ({} channel(s), {} Hz, {})",
             name, channels, config.sample_rate.0, format
         );
-        if channels < 3 {
-            eprintln!(
-                "note: {} only has {} channel(s); the plot needs 3, so the missing \
-                 ones reuse the last available channel. Use --device with a 3+ channel \
-                 interface, or a virtual device such as BlackHole, for a real plot.",
-                name, channels
-            );
-        }
+
+        // An explicit request is honoured strictly: silently substituting a
+        // different channel would produce a plot that looks plausible and is
+        // wrong. Without a request, fall back to the first three and repeat the
+        // last one, so a built in mic still draws something.
+        let map: [usize; 3] = match channel_map {
+            Some(requested) => {
+                for &c in requested.iter() {
+                    if c >= channels {
+                        return Err(format!(
+                            "--channels asks for channel {}, but {} has only {} channel(s)",
+                            c + 1,
+                            name,
+                            channels
+                        ));
+                    }
+                }
+                requested
+            }
+            None => {
+                let last = channels.saturating_sub(1);
+                if channels < 3 {
+                    eprintln!(
+                        "note: {} only has {} channel(s); the plot needs 3, so the missing \
+                         ones reuse the last available channel. Use a 3+ channel interface \
+                         or a virtual device such as BlackHole for a real plot.",
+                        name, channels
+                    );
+                }
+                [last.min(0), last.min(1), last.min(2)]
+            }
+        };
+
+        println!(
+            "channel mapping: {} -> plot 1, {} -> plot 2, {} -> plot 3",
+            map[0] + 1,
+            map[1] + 1,
+            map[2] + 1
+        );
 
         let err_fn = |e| eprintln!("audio stream error: {}", e);
 
@@ -167,7 +243,7 @@ mod cpal_backend {
                 device.build_input_stream(
                     &config,
                     move |data: &[$t], _: &cpal::InputCallbackInfo| {
-                        feed(data, channels, &mut producers)
+                        feed(data, channels, map, &mut producers)
                     },
                     err_fn,
                     None,
@@ -195,10 +271,10 @@ mod cpal_backend {
         Ok(Audio { _stream: stream })
     }
 
-    /// De-interleaves one callback buffer into the three ring buffers. Channels
-    /// beyond what the device offers repeat the last one, so a stereo or mono
-    /// device still produces a picture instead of failing outright.
-    fn feed<T>(data: &[T], channels: usize, producers: &mut Producers)
+    /// De-interleaves one callback buffer into the three ring buffers, taking
+    /// the device channels named by `map` (already validated against
+    /// `channels`).
+    fn feed<T>(data: &[T], channels: usize, map: [usize; 3], producers: &mut Producers)
     where
         T: cpal::Sample,
         f32: FromSample<T>,
@@ -207,12 +283,12 @@ mod cpal_backend {
             return;
         }
         for frame in data.chunks(channels) {
-            if frame.is_empty() {
+            // A trailing partial frame would make the map indices unsafe.
+            if frame.len() < channels {
                 continue;
             }
             for (i, producer) in producers.iter_mut().enumerate() {
-                let sample = frame[i.min(frame.len() - 1)];
-                let _ = producer.push(f32::from_sample_(sample));
+                let _ = producer.push(f32::from_sample_(frame[map[i]]));
             }
         }
     }

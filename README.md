@@ -4,10 +4,19 @@ Recurrence plot of three audio channels, rendered as
 `|in1[x]-in2[y]| * |in1[x]-in3[y]| * |in3[x]-in2[y]|`.
 
 Audio comes from JACK on Linux (ports `vis_in_1..3`) and from CoreAudio on
-macOS, where no JACK install is needed. Pick a macOS input with `--device`;
-`--list-devices` shows what is available. A device with fewer than three
-channels still draws, reusing its last channel for the missing ones, so for a
-real plot use a 3+ channel interface or a virtual device such as BlackHole.
+macOS, where no JACK install is needed.
+
+On macOS pick the input with `--device` and, if the channels you want are not
+the first three, map them with `--channels`:
+
+    ./visualizer-piston --list-devices
+    ./visualizer-piston --device BlackHole --channels 4,5,6
+
+`--channels` takes three 1-based device channels and is checked against the
+device, so asking for a channel it does not have is an error rather than a
+plausible-looking wrong plot. Without it the first three channels are used, and
+a device with fewer than three repeats its last channel so a built-in mic still
+draws something.
 
     cargo build --release
     ./target/release/visualizer-piston
@@ -18,6 +27,7 @@ real plot use a 3+ channel interface or a virtual device such as BlackHole.
     --fps N            frame rate (default 60)
     --length N         matrix side length (default 1000, max 4096)
     --device NAME      input device, substring match (CoreAudio only)
+    --channels A,B,C   device channels to plot, 1-based (default 1,2,3)
     --list-devices     list available inputs and exit
 
 ## Keys

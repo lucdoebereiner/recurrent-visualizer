@@ -49,6 +49,7 @@ struct Config {
     fps: u64,
     length: usize,
     device: Option<String>,
+    channels: audio::ChannelMap,
 }
 
 impl Config {
@@ -58,6 +59,7 @@ impl Config {
             fps: 60,
             length: 1000,
             device: None,
+            channels: None,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -73,18 +75,33 @@ impl Config {
                         .unwrap_or(cfg.length);
                 }
                 "--device" => cfg.device = args.next(),
+                "--channels" => {
+                    let raw = args.next().unwrap_or_default();
+                    match audio::parse_channels(&raw) {
+                        Some(map) => cfg.channels = Some(map),
+                        None => {
+                            eprintln!(
+                                "--channels wants three comma separated 1-based channel \
+                                 numbers, e.g. --channels 4,5,6 (got {:?})",
+                                raw
+                            );
+                            std::process::exit(2);
+                        }
+                    }
+                }
                 "--list-devices" => {
                     audio::list_inputs();
                     std::process::exit(0);
                 }
                 "-h" | "--help" => {
                     println!(
-                        "visualizer [--fullscreen] [--fps N] [--length N] [--device NAME]\n\
+                        "visualizer [--fullscreen] [--fps N] [--length N] [--device NAME] [--channels A,B,C]\n\
                          \n\
                            --fullscreen, -f   start borderless fullscreen (F11 toggles, Esc quits)\n\
                            --fps N            frame/update rate (default 60)\n\
                            --length N         recurrence matrix side length (default 1000)\n\
                            --device NAME      input device, substring match (CoreAudio only)\n\
+                           --channels A,B,C   device channels to plot, 1-based (default 1,2,3)\n\
                            --list-devices     list available inputs and exit\n\
                          \n\
                          OSC on 127.0.0.1:{}: /factor f, /exponent f, /bwmode i,\n\
@@ -435,6 +452,7 @@ fn main() {
     let _audio: audio::Audio = match audio::start(
         [producer_1, producer_2, producer_3],
         cfg.device.as_deref(),
+        cfg.channels,
     ) {
         Ok(audio) => audio,
         Err(e) => {
