@@ -137,15 +137,23 @@ At startup the app prints what it settled on:
 Use `-f` or the `F` key. Both give *borderless* fullscreen, which stays on the
 current Space.
 
-The green titlebar button gives macOS **native** fullscreen, which moves the
-window to a Space of its own; borderless keeps it on the current one.
+Fullscreen here is macOS **simple fullscreen**, the pre-Lion style that fills
+the screen while the window stays on the current Space. This matters: native
+fullscreen puts the window on a Space of its own, and a window on an inactive
+Space is treated as fully occluded, which is what froze the image when another
+window took focus.
 
-**Known issue:** in fullscreen, giving focus to another window has been
-reported to freeze the image, while a normal window keeps updating. Two
-countermeasures are in: the GL context is re-attached when focus returns, and
-App Nap is disabled via `NSProcessInfo beginActivityWithOptions` so that macOS
-does not suspend the app's timers once it stops being frontmost. Neither has
-been confirmed on hardware — there is no Mac in the loop here.
+winit routes even `Fullscreen::Borderless` through `toggleFullScreen:` on
+macOS, so it allocates a Space too — hence `set_simple_fullscreen` instead. The
+green titlebar button is also stopped from offering native fullscreen
+(`NSWindowCollectionBehaviorFullScreenNone`), so it zooms the window rather
+than opening a Space. No route into a Space is left.
+
+Two earlier countermeasures remain in place: the GL context is re-attached when
+focus returns, and App Nap is disabled via `NSProcessInfo
+beginActivityWithOptions` so macOS does not suspend the app's timers once it
+stops being frontmost. None of this has been confirmed on hardware — there is
+no Mac in the loop here.
 
 If it still freezes, run with `--stats` and watch the once-a-second line while
 it happens:

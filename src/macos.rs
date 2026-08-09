@@ -1,5 +1,38 @@
 //! macOS specific workarounds.
 
+use std::os::raw::c_void;
+
+/// Stops the green titlebar button from offering *native* fullscreen.
+///
+/// Native fullscreen moves the window onto a Space of its own, which is where
+/// the freeze on losing focus comes from. With `FullScreenNone` the button
+/// zooms the window instead, so no route leads into a Space; the app's own
+/// `-f` / `F` fullscreen uses the pre-Lion "simple fullscreen" mode, which
+/// fills the screen while staying on the current Space.
+///
+/// Only the fullscreen bits of the collection behaviour are touched, so
+/// whatever else winit set stays as it was.
+pub fn disable_native_fullscreen(ns_window: *mut c_void) {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+
+    // NSWindowCollectionBehavior, from NSWindow.h.
+    const FULL_SCREEN_PRIMARY: u64 = 1 << 7;
+    const FULL_SCREEN_AUXILIARY: u64 = 1 << 8;
+    const FULL_SCREEN_NONE: u64 = 1 << 9;
+
+    let window = ns_window as *mut Object;
+    if window.is_null() {
+        return;
+    }
+
+    unsafe {
+        let current: u64 = msg_send![window, collectionBehavior];
+        let updated = (current & !(FULL_SCREEN_PRIMARY | FULL_SCREEN_AUXILIARY)) | FULL_SCREEN_NONE;
+        let _: () = msg_send![window, setCollectionBehavior: updated];
+    }
+}
+
 /// Declares this process as doing user initiated, latency critical work so that
 /// App Nap leaves it alone.
 ///

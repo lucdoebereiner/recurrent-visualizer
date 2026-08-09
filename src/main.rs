@@ -2,6 +2,7 @@ mod audio;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(not(target_os = "macos"))]
 use glutin::window::Fullscreen;
 use glutin_window::GlutinWindow as Window;
 use graphics::{clear, color, Image};
@@ -421,7 +422,9 @@ fn build_window(cfg: &Config, opengl: OpenGL) -> Window {
     let settings = || {
         WindowSettings::new("visualizer", [1024, 768])
             .graphics_api(opengl)
-            .fullscreen(cfg.fullscreen)
+            // On macOS this would open a native fullscreen window, i.e. a new
+            // Space; it is applied after creation via simple fullscreen instead.
+            .fullscreen(cfg.fullscreen && !cfg!(target_os = "macos"))
             .exit_on_esc(true)
     };
 
@@ -445,6 +448,18 @@ fn build_window(cfg: &Config, opengl: OpenGL) -> Window {
 }
 
 fn set_fullscreen(window: &Window, on: bool) {
+    // winit routes even Fullscreen::Borderless through toggleFullScreen: on
+    // macOS, which allocates a Space. Simple fullscreen is the pre-Lion style
+    // that just fills the screen, staying on the current Space.
+    #[cfg(target_os = "macos")]
+    {
+        use glutin::platform::macos::WindowExtMacOS;
+        if !window.ctx.window().set_simple_fullscreen(on) {
+            eprintln!("could not toggle fullscreen; is the window in native fullscreen?");
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     window.ctx.window().set_fullscreen(if on {
         Some(Fullscreen::Borderless(None))
     } else {
@@ -483,6 +498,15 @@ fn main() {
     let opengl = OpenGL::V3_2;
 
     let mut window = build_window(&cfg, opengl);
+
+    #[cfg(target_os = "macos")]
+    {
+        use glutin::platform::macos::WindowExtMacOS;
+        macos::disable_native_fullscreen(window.ctx.window().ns_window());
+        if cfg.fullscreen {
+            set_fullscreen(&window, true);
+        }
+    }
 
     let mut is_fullscreen = cfg.fullscreen;
 
