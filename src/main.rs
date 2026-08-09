@@ -120,7 +120,7 @@ impl Config {
                     println!(
                         "visualizer [--fullscreen] [--fps N] [--length N] [--device NAME] [--channels A,B,C]\n\
                          \n\
-                           --fullscreen, -f   start borderless fullscreen (F11 toggles, Esc quits)\n\
+                           --fullscreen, -f   start fullscreen (F or F11 toggles, Esc quits)\n\
                            --fps N            frame/update rate (default 60)\n\
                            --length N         recurrence matrix side length (default 1000)\n\
                            --device NAME      input device, substring match (CoreAudio only)\n\

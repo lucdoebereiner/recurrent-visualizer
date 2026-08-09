@@ -66,7 +66,8 @@ Note that JACK port numbering is 1-based while SuperCollider's bus indices are
 0-based, so server bus 3 is the port `out_4`.
 
 `--device` and `--channels` do nothing here: routing is the patchbay's job, and
-the app says so if you pass them.
+the app says so if you pass them. For putting the window on a projector, see
+[Choosing the display](#choosing-the-display).
 
 ### If the window fails to open
 
@@ -132,25 +133,6 @@ At startup the app prints what it settled on:
     audio input: BlackHole 16ch (16 channel(s), 48000 Hz, f32)
     channel mapping: 4 -> plot 1, 5 -> plot 2, 6 -> plot 3
 
-### Choosing the display
-
-Fullscreen applies to whichever display the window is currently on, so put it
-there first. Either drag the window across and press `F`, or say so at startup:
-
-    ./visualizer-piston --list-displays
-    ./visualizer-piston --display 2 -f
-
-`--display` is 1-based and positions the window on that display before going
-fullscreen. This works the same on Linux.
-
-The display's resolution does not need to match anything: the plot is scaled to
-whatever the window currently is, so a lower-resolution projector simply gets
-fewer pixels. (`glutin_window` re-attaches the GL context only on `Resized` and
-drops `ScaleFactorChanged` entirely, so moving between displays of different
-scale factors used to leave the framebuffer at its old size and the picture in a
-corner with black margins on the right and bottom. The window size is now
-tracked directly and the context re-attached whenever it changes.)
-
 ### Fullscreen
 
 Use `-f` or the `F` key. Both give *borderless* fullscreen, which stays on the
@@ -213,9 +195,41 @@ terminal application you launch it from.
 
 ---
 
+## Choosing the display
+
+Applies to both platforms. Fullscreen goes to whichever display the window is
+currently on, so put it there first — drag the window across and press `F`, or
+say so at startup:
+
+    ./visualizer-piston --list-displays
+    ./visualizer-piston --display 2 -f
+
+`--display` is 1-based and positions the window on that display before going
+fullscreen. Display numbering follows the order the OS reports, which need not
+match the arrangement in the system settings; `--list-displays` prints each
+one's name, size and pixel position so you can tell them apart:
+
+    displays:
+      1: eDP-1 -- 2880x1800 at (0, 0)
+      2: HDMI-1 -- 1920x1080 at (2880, 0)
+
+The display's resolution does not need to match anything. The plot is a texture
+scaled to fill the window, so a lower-resolution projector simply gets fewer
+pixels. If the display is much narrower than the matrix, a smaller `--length`
+(say 600) samples it more honestly than squeezing 1000 cells into 800 pixels.
+
+`glutin_window` re-attaches the GL context only on `Resized` and drops
+`ScaleFactorChanged` entirely, so moving between displays of different scale
+factors — a Retina laptop and a 1x projector, say — used to leave the
+framebuffer at its old size, putting the picture in a corner with black margins
+to the right and below. The window size is now tracked directly and the context
+re-attached whenever it changes.
+
+---
+
 ## Options
 
-    -f, --fullscreen   start borderless fullscreen
+    -f, --fullscreen   start fullscreen
     --fps N            frame rate (default 60)
     --length N         matrix side length (default 1000, max 4096)
     --device NAME      input device, substring match (CoreAudio only)
