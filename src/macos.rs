@@ -2,6 +2,46 @@
 
 use std::os::raw::c_void;
 
+/// `NSWindow` level that sits just above the menu bar (`NSMainMenuWindowLevel`
+/// is 24). A window at this level covers the menu bar whatever the application
+/// presentation options happen to be.
+pub const LEVEL_ABOVE_MENU_BAR: i64 = 25;
+/// `NSNormalWindowLevel`.
+pub const LEVEL_NORMAL: i64 = 0;
+
+/// Sets the window's level, used to lift a fullscreen window over the menu bar
+/// and to drop it back when the app is not in front.
+pub fn set_window_level(ns_window: *mut c_void, level: i64) {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+
+    let window = ns_window as *mut Object;
+    if window.is_null() {
+        return;
+    }
+    unsafe {
+        let _: () = msg_send![window, setLevel: level];
+    }
+}
+
+/// Brings the process to the front.
+///
+/// Presentation options are only honoured for the *active* application, and
+/// winit notes that activation is unreliable for an unbundled binary — which
+/// this is, when run straight from a terminal.
+pub fn activate() {
+    use objc::runtime::{Object, YES};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        if app.is_null() {
+            return;
+        }
+        let _: () = msg_send![app, activateIgnoringOtherApps: YES];
+    }
+}
+
 /// Hides the menu bar and the Dock outright.
 ///
 /// winit's simple fullscreen sets only the *auto* hide options, so the menu bar

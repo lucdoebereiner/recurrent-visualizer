@@ -132,6 +132,17 @@ At startup the app prints what it settled on:
     audio input: BlackHole 16ch (16 channel(s), 48000 Hz, f32)
     channel mapping: 4 -> plot 1, 5 -> plot 2, 6 -> plot 3
 
+### Choosing the display
+
+Fullscreen applies to whichever display the window is currently on, so put it
+there first. Either drag the window across and press `F`, or say so at startup:
+
+    ./visualizer-piston --list-displays
+    ./visualizer-piston --display 2 -f
+
+`--display` is 1-based and positions the window on that display before going
+fullscreen. This works the same on Linux.
+
 ### Fullscreen
 
 Use `-f` or the `F` key. Both give *borderless* fullscreen, which stays on the
@@ -151,8 +162,17 @@ than opening a Space. No route into a Space is left.
 
 winit's simple fullscreen only *auto*-hides the menu bar and Dock, so they slide
 back in when the pointer nears the screen edge. Both are hidden outright
-instead (`NSApplicationPresentationHideDock | HideMenuBar`), and restored when
-fullscreen is left.
+instead (`NSApplicationPresentationHideDock | HideMenuBar`). Because those
+options are only honoured while this app is frontmost — and winit notes that
+activation is unreliable for an unbundled binary, which this is when run from a
+terminal — the fullscreen window is *also* raised above `NSMainMenuWindowLevel`,
+which covers the menu bar whatever the presentation options do. The level drops
+back to normal when the app loses focus, so a fullscreen visualizer does not sit
+on top of everything else, and is raised again on return.
+
+Since native fullscreen is disabled, there are no Spaces to manage. Option-click
+on the green button zooms the window to fill the display it is on, which is a
+perfectly good alternative to `F`.
 
 Two earlier countermeasures remain in place: the GL context is re-attached when
 focus returns, and App Nap is disabled via `NSProcessInfo
@@ -194,6 +214,8 @@ terminal application you launch it from.
     --channels A,B,C   device channels to plot, 1-based (default 1,2,3)
     --list-devices     list available inputs and exit
     --stats            print frame and audio rates once a second
+    --display N        open on display N, 1-based
+    --list-displays    list displays and exit
 
 ## Keys
 

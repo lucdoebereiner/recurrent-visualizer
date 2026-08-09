@@ -55,6 +55,8 @@ struct Config {
     device: Option<String>,
     channels: audio::ChannelMap,
     stats: bool,
+    display: Option<usize>,
+    list_displays: bool,
 }
 
 impl Config {
@@ -66,6 +68,8 @@ impl Config {
             device: None,
             channels: None,
             stats: false,
+            display: None,
+            list_displays: false,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -82,6 +86,18 @@ impl Config {
                 }
                 "--device" => cfg.device = args.next(),
                 "--stats" => cfg.stats = true,
+                "--display" => {
+                    cfg.display = args
+                        .next()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .filter(|n| *n >= 1)
+                        .map(|n| n - 1);
+                    if cfg.display.is_none() {
+                        eprintln!("--display wants a 1-based display number, see --list-displays");
+                        std::process::exit(2);
+                    }
+                }
+                "--list-displays" => cfg.list_displays = true,
                 "--channels" => {
                     let raw = args.next().unwrap_or_default();
                     match audio::parse_channels(&raw) {
@@ -111,6 +127,8 @@ impl Config {
                            --channels A,B,C   device channels to plot, 1-based (default 1,2,3)\n\
                            --list-devices     list available inputs and exit\n\
                            --stats            print frame and audio rates once a second\n\
+                           --display N        open on display N, 1-based\n\
+                           --list-displays    list displays and exit\n\
                          \n\
                          OSC on 127.0.0.1:{}: /factor f, /exponent f, /bwmode i,\n\
                          /offsetx i, /offsety i, /zoom f, /fullscreen i",
@@ -447,6 +465,43 @@ fn build_window(cfg: &Config, opengl: OpenGL) -> Window {
     panic!("could not create window: {}", err);
 }
 
+fn list_displays(window: &Window) {
+    println!("displays:");
+    for (i, monitor) in window.ctx.window().available_monitors().enumerate() {
+        let size = monitor.size();
+        let pos = monitor.position();
+        println!(
+            "  {}: {} -- {}x{} at ({}, {})",
+            i + 1,
+            monitor.name().unwrap_or_else(|| "<unnamed>".into()),
+            size.width,
+            size.height,
+            pos.x,
+            pos.y
+        );
+    }
+}
+
+/// Moves the window onto the given display, so that a following fullscreen
+/// lands there.
+fn place_on_display(window: &Window, index: usize) {
+    let monitors: Vec<_> = window.ctx.window().available_monitors().collect();
+    match monitors.get(index) {
+        Some(monitor) => {
+            println!(
+                "opening on display {} ({})",
+                index + 1,
+                monitor.name().unwrap_or_else(|| "<unnamed>".into())
+            );
+            window.ctx.window().set_outer_position(monitor.position());
+        }
+        None => {
+            eprintln!("no display {}; available:", index + 1);
+            list_displays(window);
+        }
+    }
+}
+
 fn set_fullscreen(window: &Window, on: bool) {
     // winit routes even Fullscreen::Borderless through toggleFullScreen: on
     // macOS, which allocates a Space. Simple fullscreen is the pre-Lion style
@@ -455,10 +510,19 @@ fn set_fullscreen(window: &Window, on: bool) {
     {
         use glutin::platform::macos::WindowExtMacOS;
         if window.ctx.window().set_simple_fullscreen(on) {
+            let ns_window = window.ctx.window().ns_window();
             if on {
-                // winit only asks for auto-hide, which lets the menu bar slide
-                // back in on pointer approach.
+                // Two independent mechanisms, because neither is sufficient on
+                // its own: the presentation options only apply while this app
+                // is frontmost (and activation is unreliable for an unbundled
+                // binary), while the raised window level covers the menu bar
+                // regardless. winit asks only for *auto* hide, which lets the
+                // bar slide back in on pointer approach.
+                macos::activate();
                 macos::hide_menu_bar_and_dock();
+                macos::set_window_level(ns_window, macos::LEVEL_ABOVE_MENU_BAR);
+            } else {
+                macos::set_window_level(ns_window, macos::LEVEL_NORMAL);
             }
         } else {
             eprintln!("could not toggle fullscreen; is the window in native fullscreen?");
@@ -505,13 +569,25 @@ fn main() {
 
     let mut window = build_window(&cfg, opengl);
 
+    if cfg.list_displays {
+        list_displays(&window);
+        std::process::exit(0);
+    }
+
+    // Must happen before going fullscreen: fullscreen applies to whichever
+    // display the window is currently on.
+    if let Some(index) = cfg.display {
+        place_on_display(&window, index);
+    }
+
     #[cfg(target_os = "macos")]
-    {
+    macos::disable_native_fullscreen({
         use glutin::platform::macos::WindowExtMacOS;
-        macos::disable_native_fullscreen(window.ctx.window().ns_window());
-        if cfg.fullscreen {
-            set_fullscreen(&window, true);
-        }
+        window.ctx.window().ns_window()
+    });
+
+    if cfg.fullscreen {
+        set_fullscreen(&window, true);
     }
 
     let mut is_fullscreen = cfg.fullscreen;
@@ -567,9 +643,26 @@ fn main() {
         // coming back from another app leaves the image frozen. No Resized
         // event fires, since the size did not change, so glutin never
         // re-attaches the context on its own. Doing it on focus is cheap.
-        if let Event::Input(Input::Focus(true), _) = &e {
-            let size = window.ctx.window().inner_size();
-            window.ctx.resize(size);
+        if let Event::Input(Input::Focus(focused), _) = &e {
+            if *focused {
+                let size = window.ctx.window().inner_size();
+                window.ctx.resize(size);
+            }
+
+            // Give the screen back to whatever the user switched to, and take
+            // it again on return. Without dropping the level, a fullscreen
+            // visualizer would sit on top of every other window.
+            #[cfg(target_os = "macos")]
+            if is_fullscreen {
+                use glutin::platform::macos::WindowExtMacOS;
+                let ns_window = window.ctx.window().ns_window();
+                if *focused {
+                    macos::hide_menu_bar_and_dock();
+                    macos::set_window_level(ns_window, macos::LEVEL_ABOVE_MENU_BAR);
+                } else {
+                    macos::set_window_level(ns_window, macos::LEVEL_NORMAL);
+                }
+            }
         }
 
         while let Ok(p) = rx.try_recv() {
