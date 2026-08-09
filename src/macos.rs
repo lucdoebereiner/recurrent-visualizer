@@ -42,6 +42,23 @@ pub fn activate() {
     }
 }
 
+/// Puts the menu bar and Dock back (`NSApplicationPresentationDefault`).
+///
+/// winit used to restore these when leaving its own simple fullscreen; the
+/// fullscreen here is done by hand, so the restore is too.
+pub fn restore_presentation_options() {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        if app.is_null() {
+            return;
+        }
+        let _: () = msg_send![app, setPresentationOptions: 0u64];
+    }
+}
+
 /// Hides the menu bar and the Dock outright.
 ///
 /// winit's simple fullscreen sets only the *auto* hide options, so the menu bar

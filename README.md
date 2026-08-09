@@ -218,12 +218,22 @@ scaled to fill the window, so a lower-resolution projector simply gets fewer
 pixels. If the display is much narrower than the matrix, a smaller `--length`
 (say 600) samples it more honestly than squeezing 1000 cells into 800 pixels.
 
-`glutin_window` re-attaches the GL context only on `Resized` and drops
-`ScaleFactorChanged` entirely, so moving between displays of different scale
-factors — a Retina laptop and a 1x projector, say — used to leave the
-framebuffer at its old size, putting the picture in a corner with black margins
-to the right and below. The window size is now tracked directly and the context
-re-attached whenever it changes.
+On macOS, fullscreen is done by hand rather than through winit, and is sized
+explicitly to the chosen monitor. Three separate problems made the obvious
+routes unreliable:
+
+- `Fullscreen::Borderless` goes through `toggleFullScreen:` and allocates a
+  Space, which is what froze the picture on losing focus.
+- `set_simple_fullscreen` avoids the Space, but sizes to whichever screen it
+  believes the window is on *at that instant* — which races with having just
+  moved the window to another display, so it would size to the internal screen.
+- `glutin_window` re-attaches the GL context only on `Resized` and discards
+  `ScaleFactorChanged`, so a move between displays of different scale factors
+  (a Retina laptop and a 1x projector) left the framebuffer at its old size.
+
+The window is now positioned and sized directly to the monitor's own geometry,
+the window size is tracked across frames, and the context re-attached whenever
+it changes.
 
 ---
 

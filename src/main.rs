@@ -4,6 +4,8 @@ mod macos;
 
 #[cfg(not(target_os = "macos"))]
 use glutin::window::Fullscreen;
+use glutin::dpi::{PhysicalPosition, PhysicalSize};
+use glutin::monitor::MonitorHandle;
 use glutin_window::GlutinWindow as Window;
 use graphics::{clear, color, Image};
 use opengl_graphics::{
@@ -502,39 +504,101 @@ fn place_on_display(window: &Window, index: usize) {
     }
 }
 
-fn set_fullscreen(window: &Window, on: bool) {
-    // winit routes even Fullscreen::Borderless through toggleFullScreen: on
-    // macOS, which allocates a Space. Simple fullscreen is the pre-Lion style
-    // that just fills the screen, staying on the current Space.
+/// The monitor a fullscreen window should cover: the one named by `--display`
+/// if given, otherwise whichever the window currently sits on.
+fn target_monitor(window: &Window, display: Option<usize>) -> Option<MonitorHandle> {
+    let w = window.ctx.window();
+    match display {
+        Some(index) => w.available_monitors().nth(index).or_else(|| w.current_monitor()),
+        None => w.current_monitor(),
+    }
+}
+
+/// Windowed geometry, remembered so leaving fullscreen can restore it.
+type SavedGeometry = Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>;
+
+fn set_fullscreen(
+    window: &Window,
+    on: bool,
+    display: Option<usize>,
+    saved: &mut SavedGeometry,
+) {
+    // macOS gets fullscreen by hand rather than through winit.
+    //
+    // `Fullscreen::Borderless` routes through `toggleFullScreen:` and allocates
+    // a Space, which is what froze the picture on losing focus.
+    // `set_simple_fullscreen` avoids the Space but sizes to `ns_window.screen()`
+    // — whichever screen it believes the window is on at that moment, which
+    // races with having just moved the window to another display. And because
+    // `glutin_window` discards `ScaleFactorChanged`, `inner_size()` can stay
+    // stale afterwards, so the drawable never catches up and the picture sits
+    // in a corner with black to the right and below.
+    //
+    // Sizing explicitly to the monitor we picked sidesteps all three.
     #[cfg(target_os = "macos")]
     {
         use glutin::platform::macos::WindowExtMacOS;
-        if window.ctx.window().set_simple_fullscreen(on) {
-            let ns_window = window.ctx.window().ns_window();
-            if on {
-                // Two independent mechanisms, because neither is sufficient on
-                // its own: the presentation options only apply while this app
-                // is frontmost (and activation is unreliable for an unbundled
-                // binary), while the raised window level covers the menu bar
-                // regardless. winit asks only for *auto* hide, which lets the
-                // bar slide back in on pointer approach.
-                macos::activate();
-                macos::hide_menu_bar_and_dock();
-                macos::set_window_level(ns_window, macos::LEVEL_ABOVE_MENU_BAR);
-            } else {
-                macos::set_window_level(ns_window, macos::LEVEL_NORMAL);
+        let w = window.ctx.window();
+
+        if on {
+            let monitor = match target_monitor(window, display) {
+                Some(monitor) => monitor,
+                None => {
+                    eprintln!("no display to go fullscreen on");
+                    return;
+                }
+            };
+
+            if saved.is_none() {
+                *saved = Some((
+                    w.outer_position().unwrap_or(PhysicalPosition::new(0, 0)),
+                    w.inner_size(),
+                ));
             }
+
+            let position = monitor.position();
+            let size = monitor.size();
+            println!(
+                "fullscreen on {} ({}x{} at {}, {})",
+                monitor.name().unwrap_or_else(|| "<unnamed>".into()),
+                size.width,
+                size.height,
+                position.x,
+                position.y
+            );
+
+            w.set_decorations(false);
+            w.set_outer_position(position);
+            w.set_inner_size(size);
+
+            // Two independent mechanisms, because neither suffices alone: the
+            // presentation options only apply while this app is frontmost, and
+            // winit notes activation is unreliable for an unbundled binary,
+            // whereas the raised window level covers the menu bar regardless.
+            macos::activate();
+            macos::hide_menu_bar_and_dock();
+            macos::set_window_level(w.ns_window(), macos::LEVEL_ABOVE_MENU_BAR);
         } else {
-            eprintln!("could not toggle fullscreen; is the window in native fullscreen?");
+            macos::set_window_level(w.ns_window(), macos::LEVEL_NORMAL);
+            macos::restore_presentation_options();
+            w.set_decorations(true);
+            if let Some((position, size)) = saved.take() {
+                w.set_outer_position(position);
+                w.set_inner_size(size);
+            }
         }
     }
 
     #[cfg(not(target_os = "macos"))]
-    window.ctx.window().set_fullscreen(if on {
-        Some(Fullscreen::Borderless(None))
-    } else {
-        None
-    });
+    {
+        let _ = saved;
+        let fullscreen = if on {
+            Some(Fullscreen::Borderless(target_monitor(window, display)))
+        } else {
+            None
+        };
+        window.ctx.window().set_fullscreen(fullscreen);
+    }
 }
 
 fn main() {
@@ -586,8 +650,9 @@ fn main() {
         window.ctx.window().ns_window()
     });
 
+    let mut saved_geometry: SavedGeometry = None;
     if cfg.fullscreen {
-        set_fullscreen(&window, true);
+        set_fullscreen(&window, true, cfg.display, &mut saved_geometry);
     }
 
     let mut is_fullscreen = cfg.fullscreen;
@@ -640,7 +705,7 @@ fn main() {
             );
             if args.state == ButtonState::Press && toggle {
                 is_fullscreen = !is_fullscreen;
-                set_fullscreen(&window, is_fullscreen);
+                set_fullscreen(&window, is_fullscreen, cfg.display, &mut saved_geometry);
                 last_size = window.ctx.window().inner_size();
                 window.ctx.resize(last_size);
             }
@@ -697,7 +762,7 @@ fn main() {
                     "/fullscreen" => {
                         if let Some(f) = int_osc(p) {
                             is_fullscreen = f != 0;
-                            set_fullscreen(&window, is_fullscreen);
+                            set_fullscreen(&window, is_fullscreen, cfg.display, &mut saved_geometry);
                         }
                     }
                     addr => println!("unknown addr {}", addr),
