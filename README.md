@@ -241,12 +241,18 @@ main run loop, and both geometry calls convert through the window's scale
 factor **as it is when they are called** — so aiming at a 1x projector while the
 window still sits on a 2x internal display halves the request. That is why
 `--display N -f` used to work only sometimes. The requested geometry is now
-re-applied every frame until the window actually reports it, for up to five
-seconds; the scale factor is read live, so once the window has landed on the
-target display the request converts correctly and sticks. If it never settles
-the app says so rather than retrying forever:
+re-applied until the window reports it, at most every 100 ms and for at most
+three seconds; the scale factor is read live, so once the window has landed on
+the target display the request converts correctly and sticks.
 
-    fullscreen geometry never settled: wanted 1920x1080, window reports 960x540
+The window does not always report exactly what was asked for — a scaled display
+mode rounds the backing store — so this settles on the size going *stable*
+rather than on an exact match, and just says what it ended up with:
+
+    fullscreen: asked for 1920x1080, window settled at 1728x1080
+
+That line is informational. The window covers the display either way; it is
+worth reading only if the picture looks wrong.
 
 ---
 

@@ -604,27 +604,52 @@ fn set_fullscreen(
 
 /// Keeps re-applying the requested fullscreen geometry until the window
 /// reports it, because the macOS calls that set it are asynchronous and
-/// scale-factor dependent (see `set_fullscreen`). Gives up after a few seconds
-/// and says what it got, rather than retrying forever.
+/// scale-factor dependent (see `set_fullscreen`).
+///
+/// The window does not always end up reporting exactly what was asked for — a
+/// scaled display mode rounds the backing store — so this settles on the
+/// geometry going *stable*, not on an exact match, and says what it ended up
+/// with when the two differ.
 struct FullscreenEnforcer {
     target: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+    started: Instant,
     deadline: Instant,
+    last_apply: Instant,
+    last_seen: Option<PhysicalSize<u32>>,
+    stable_polls: u32,
     settled: bool,
 }
+
+/// How long the size must hold still before it counts as final.
+const STABLE_POLLS: u32 = 12;
+/// Re-applying on every frame just queues up async work; this is often enough.
+const APPLY_INTERVAL: Duration = Duration::from_millis(100);
+/// The window needs a moment to reach the other display before its size
+/// holding still means anything.
+const SETTLE_GRACE: Duration = Duration::from_millis(700);
 
 impl FullscreenEnforcer {
     fn new() -> Self {
         FullscreenEnforcer {
             target: None,
+            started: Instant::now(),
             deadline: Instant::now(),
+            last_apply: Instant::now(),
+            last_seen: None,
+            stable_polls: 0,
             settled: true,
         }
     }
 
     fn aim(&mut self, target: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>) {
+        let now = Instant::now();
         self.target = target;
         self.settled = target.is_none();
-        self.deadline = Instant::now() + Duration::from_secs(5);
+        self.started = now;
+        self.deadline = now + Duration::from_secs(3);
+        self.last_apply = now;
+        self.last_seen = None;
+        self.stable_polls = 0;
     }
 
     fn poll(&mut self, window: &Window) {
@@ -633,25 +658,41 @@ impl FullscreenEnforcer {
             _ => return,
         };
 
-        let actual = window.ctx.window().inner_size();
-        if actual == size {
+        let w = window.ctx.window();
+        let actual = w.inner_size();
+
+        // A couple of pixels out is rounding in a scaled display mode, not a
+        // failure.
+        let matches = (actual.width as i64 - size.width as i64).abs() <= 2
+            && (actual.height as i64 - size.height as i64).abs() <= 2;
+        if matches {
             self.settled = true;
             return;
         }
 
-        if Instant::now() >= self.deadline {
-            eprintln!(
-                "fullscreen geometry never settled: wanted {}x{}, window reports {}x{}",
+        if self.last_seen == Some(actual) {
+            self.stable_polls += 1;
+        } else {
+            self.last_seen = Some(actual);
+            self.stable_polls = 0;
+        }
+
+        let now = Instant::now();
+        let held_still = self.stable_polls >= STABLE_POLLS && now - self.started >= SETTLE_GRACE;
+        if held_still || now >= self.deadline {
+            self.settled = true;
+            println!(
+                "fullscreen: asked for {}x{}, window settled at {}x{}",
                 size.width, size.height, actual.width, actual.height
             );
-            self.settled = true;
             return;
         }
 
-        // The scale factor is read live, so once the window has actually landed
-        // on the target display this request converts correctly and sticks.
-        window.ctx.window().set_outer_position(position);
-        window.ctx.window().set_inner_size(size);
+        if now - self.last_apply >= APPLY_INTERVAL {
+            self.last_apply = now;
+            w.set_outer_position(position);
+            w.set_inner_size(size);
+        }
     }
 }
 
