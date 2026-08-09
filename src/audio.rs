@@ -88,6 +88,7 @@ mod jack_backend {
 mod cpal_backend {
     use super::Producers;
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use cpal::FromSample;
 
     /// Keeps the input stream alive; dropping it stops capture.
     pub struct Audio {
@@ -200,7 +201,7 @@ mod cpal_backend {
     fn feed<T>(data: &[T], channels: usize, producers: &mut Producers)
     where
         T: cpal::Sample,
-        f32: cpal::FromSample<T>,
+        f32: FromSample<T>,
     {
         if channels == 0 {
             return;
