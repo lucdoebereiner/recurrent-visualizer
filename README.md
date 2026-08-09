@@ -9,6 +9,24 @@ Because the plot compares the three channels against each other, it wants them
 signal three times, produces a symmetric picture that says more about the
 processing than about the sources.
 
+### A diagonal from top-left to bottom-right
+
+That line is the recurrence plot's *line of identity*, and it means two of the
+three inputs carry the same signal. Where channel 3 equals channel 2 the factor
+`|in3[x]-in2[y]|` is exactly zero whenever `x == y`, so the whole diagonal goes
+black. With three genuinely distinct channels there is no such line:
+
+| inputs | diagonal | off-diagonal |
+|---|---|---|
+| three distinct channels | 0.042 | 0.034 |
+| channel 3 duplicates channel 2 | **0.000** | 0.031 |
+| all three identical (mono) | **0.000** | 0.023 |
+
+The usual cause is an input device with fewer than three channels: without
+`--channels` the visualizer repeats the last available channel to fill the
+third, which duplicates it by construction. Check the `channel mapping` line it
+prints at startup, and the channel counts in `--list-devices`.
+
 Audio input is JACK on Linux and CoreAudio on macOS. There is no JACK
 requirement on macOS.
 
@@ -114,6 +132,18 @@ At startup the app prints what it settled on:
     audio input: BlackHole 16ch (16 channel(s), 48000 Hz, f32)
     channel mapping: 4 -> plot 1, 5 -> plot 2, 6 -> plot 3
 
+### Fullscreen
+
+Use `-f` or the `F` key. Both give *borderless* fullscreen, which stays on the
+current Space.
+
+Avoid the green titlebar button: that is macOS **native** fullscreen, which
+moves the window to a Space of its own. Switching away with Cmd-Tab and back
+has been observed to leave the image frozen, because the window comes back with
+a stale drawable and no resize event fires to make glutin re-attach the
+context. The app now re-attaches on regaining focus, which should recover it,
+but borderless fullscreen avoids the situation altogether.
+
 ### Gatekeeper and microphone access
 
 Binaries from the releases page are ad-hoc signed, not signed with an Apple
@@ -137,8 +167,11 @@ terminal application you launch it from.
 
 ## Keys
 
-    F11   toggle fullscreen
-    Esc   quit
+    F, F11   toggle fullscreen
+    Esc      quit
+
+F11 is the conventional binding, but macOS reserves it for Show Desktop and the
+app never receives it, so `F` does the same thing everywhere.
 
 ## OSC (127.0.0.1:8000)
 

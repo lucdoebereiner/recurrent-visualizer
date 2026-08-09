@@ -501,10 +501,26 @@ fn main() {
 
     while let Some(e) = events.next(&mut window) {
         if let Event::Input(Input::Button(args), _) = &e {
-            if args.state == ButtonState::Press && args.button == Button::Keyboard(Key::F11) {
+            // F11 is the conventional toggle, but macOS reserves it for Show
+            // Desktop and the app never sees it, so F works as well.
+            let toggle = matches!(
+                args.button,
+                Button::Keyboard(Key::F11) | Button::Keyboard(Key::F)
+            );
+            if args.state == ButtonState::Press && toggle {
                 is_fullscreen = !is_fullscreen;
                 set_fullscreen(&window, is_fullscreen);
             }
+        }
+
+        // macOS can hand back a stale drawable after the window has been away:
+        // native fullscreen (the green button) moves it to its own Space, and
+        // coming back from another app leaves the image frozen. No Resized
+        // event fires, since the size did not change, so glutin never
+        // re-attaches the context on its own. Doing it on focus is cheap.
+        if let Event::Input(Input::Focus(true), _) = &e {
+            let size = window.ctx.window().inner_size();
+            window.ctx.resize(size);
         }
 
         while let Ok(p) = rx.try_recv() {
