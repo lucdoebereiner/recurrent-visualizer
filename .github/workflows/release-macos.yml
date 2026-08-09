@@ -2,7 +2,9 @@ name: release-macos
 
 on:
   push:
-    tags: ["v*"]
+    # Version tags only. Deliberately not "v*", so snapshot tags like
+    # v1-piston-multimode do not publish a release.
+    tags: ["v*.*"]
   workflow_dispatch:
 
 permissions:
@@ -17,7 +19,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Show toolchain
         run: |
@@ -41,7 +43,7 @@ jobs:
           tar -czf recurrent-visualizer-macos-arm64.tar.gz -C dist .
           shasum -a 256 recurrent-visualizer-macos-arm64.tar.gz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: recurrent-visualizer-macos-arm64
           path: recurrent-visualizer-macos-arm64.tar.gz
