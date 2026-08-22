@@ -1,26 +1,31 @@
-//! Three channels of audio input.
+//! Two or three channels of audio input.
 //!
 //! JACK on Linux, CoreAudio (through cpal) everywhere else. macOS ships no
 //! JACK, so requiring it there would mean asking for a third party install
 //! just to get sound into the visualiser.
+//!
+//! The number of inputs is chosen at startup, so only as many ports or device
+//! channels as the plot actually uses are claimed.
 
 use ringbuf::Producer;
 
 /// One producer per visualised channel.
-pub type Producers = [Producer<f32>; 3];
+pub type Producers = Vec<Producer<f32>>;
 
-/// Which device channels feed the three plot inputs, as 0-based indices.
-/// `None` means "the first three".
-pub type ChannelMap = Option<[usize; 3]>;
+/// Which device channels feed the plot inputs, as 0-based indices, one per
+/// input. `None` means "the first ones".
+pub type ChannelMap = Option<Vec<usize>>;
 
-/// Parses a `--channels 4,5,6` argument into 0-based indices.
-pub fn parse_channels(s: &str) -> Option<[usize; 3]> {
+/// Parses a `--channels 4,5,6` argument into 0-based indices. The count is
+/// checked against `--inputs` by the caller, which may not have been parsed
+/// yet at this point.
+pub fn parse_channels(s: &str) -> Option<Vec<usize>> {
     let parsed: Option<Vec<usize>> = s.split(',').map(|p| p.trim().parse().ok()).collect();
     let parsed = parsed?;
-    if parsed.len() != 3 || parsed.iter().any(|&c| c == 0) {
+    if parsed.is_empty() || parsed.iter().any(|&c| c == 0) {
         return None;
     }
-    Some([parsed[0] - 1, parsed[1] - 1, parsed[2] - 1])
+    Some(parsed.into_iter().map(|c| c - 1).collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -34,17 +39,20 @@ mod tests {
     use super::parse_channels;
 
     #[test]
-    fn parses_one_based_triples() {
-        assert_eq!(parse_channels("1,2,3"), Some([0, 1, 2]));
-        assert_eq!(parse_channels("4,5,6"), Some([3, 4, 5]));
-        assert_eq!(parse_channels(" 4 , 5 , 6 "), Some([3, 4, 5]));
+    fn parses_one_based_channel_lists() {
+        assert_eq!(parse_channels("1,2,3"), Some(vec![0, 1, 2]));
+        assert_eq!(parse_channels("4,5,6"), Some(vec![3, 4, 5]));
+        assert_eq!(parse_channels(" 4 , 5 , 6 "), Some(vec![3, 4, 5]));
+        // Two inputs are as valid as three; the count is checked against
+        // --inputs by the caller.
+        assert_eq!(parse_channels("4,5"), Some(vec![3, 4]));
         // Repeats are legitimate: plotting one channel against itself.
-        assert_eq!(parse_channels("2,2,7"), Some([1, 1, 6]));
+        assert_eq!(parse_channels("2,2,7"), Some(vec![1, 1, 6]));
     }
 
     #[test]
     fn rejects_malformed_input() {
-        for bad in ["", "1,2", "1,2,3,4", "0,1,2", "a,b,c", "1;2;3", "-1,2,3", "1,,3"] {
+        for bad in ["", "0,1,2", "a,b,c", "1;2;3", "-1,2,3", "1,,3", "1,2,"] {
             assert_eq!(parse_channels(bad), None, "{:?} should be rejected", bad);
         }
     }
@@ -53,9 +61,10 @@ mod tests {
 #[cfg(target_os = "linux")]
 mod jack_backend {
     use super::Producers;
-    use std::convert::TryInto;
 
-    const PORTS: [&str; 3] = ["vis_in_1", "vis_in_2", "vis_in_3"];
+    fn port_name(index: usize) -> String {
+        format!("vis_in_{}", index + 1)
+    }
 
     /// Keeps the JACK client alive; dropping it stops capture.
     pub struct Audio {
@@ -63,7 +72,7 @@ mod jack_backend {
     }
 
     struct Proc {
-        ports: [jack::Port<jack::AudioIn>; 3],
+        ports: Vec<jack::Port<jack::AudioIn>>,
         producers: Producers,
     }
 
@@ -83,10 +92,10 @@ mod jack_backend {
         }
     }
 
-    pub fn list_inputs() {
+    pub fn list_inputs(inputs: usize) {
         println!("JACK: connect a source to these ports once the app is running");
-        for name in PORTS.iter() {
-            println!("  visualizer:{}", name);
+        for i in 0..inputs {
+            println!("  visualizer:{}", port_name(i));
         }
     }
 
@@ -105,17 +114,15 @@ mod jack_backend {
             jack::Client::new("visualizer", jack::ClientOptions::NO_START_SERVER)
                 .map_err(|e| format!("could not connect to JACK: {}", e))?;
 
-        let mut ports = Vec::with_capacity(3);
-        for name in PORTS.iter() {
+        let mut ports = Vec::with_capacity(producers.len());
+        for i in 0..producers.len() {
+            let name = port_name(i);
             ports.push(
                 client
-                    .register_port(name, jack::AudioIn::default())
+                    .register_port(&name, jack::AudioIn::default())
                     .map_err(|e| format!("could not register port {}: {}", name, e))?,
             );
         }
-        let ports: [jack::Port<jack::AudioIn>; 3] = ports
-            .try_into()
-            .map_err(|_| "could not register three ports".to_string())?;
 
         let client = client
             .activate_async((), Proc { ports, producers })
@@ -136,7 +143,7 @@ mod cpal_backend {
         _stream: cpal::Stream,
     }
 
-    pub fn list_inputs() {
+    pub fn list_inputs(_inputs: usize) {
         let host = cpal::default_host();
         let default = host
             .default_input_device()
@@ -195,11 +202,13 @@ mod cpal_backend {
             name, channels, config.sample_rate.0, format
         );
 
+        let inputs = producers.len();
+
         // An explicit request is honoured strictly: silently substituting a
         // different channel would produce a plot that looks plausible and is
-        // wrong. Without a request, fall back to the first three and repeat the
-        // last one, so a built in mic still draws something.
-        let map: [usize; 3] = match channel_map {
+        // wrong. Without a request, fall back to the first channels and repeat
+        // the last one, so a built in mic still draws something.
+        let map: Vec<usize> = match channel_map {
             Some(requested) => {
                 for &c in requested.iter() {
                     if c >= channels {
@@ -215,24 +224,24 @@ mod cpal_backend {
             }
             None => {
                 let last = channels.saturating_sub(1);
-                if channels < 3 {
+                if channels < inputs {
                     eprintln!(
-                        "note: {} only has {} channel(s); the plot needs 3, so the missing \
-                         ones reuse the last available channel. Use a 3+ channel interface \
-                         or a virtual device such as BlackHole for a real plot.",
-                        name, channels
+                        "note: {} only has {} channel(s); the plot needs {}, so the missing \
+                         ones reuse the last available channel. Use an interface with enough \
+                         channels, or a virtual device such as BlackHole, for a real plot.",
+                        name, channels, inputs
                     );
                 }
-                [last.min(0), last.min(1), last.min(2)]
+                (0..inputs).map(|i| i.min(last)).collect()
             }
         };
 
-        println!(
-            "channel mapping: {} -> plot 1, {} -> plot 2, {} -> plot 3",
-            map[0] + 1,
-            map[1] + 1,
-            map[2] + 1
-        );
+        let mapping: Vec<String> = map
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{} -> plot {}", c + 1, i + 1))
+            .collect();
+        println!("channel mapping: {}", mapping.join(", "));
 
         let err_fn = |e| eprintln!("audio stream error: {}", e);
 
@@ -240,10 +249,11 @@ mod cpal_backend {
         macro_rules! build {
             ($t:ty) => {{
                 let mut producers = producers;
+                let map = map.clone();
                 device.build_input_stream(
                     &config,
                     move |data: &[$t], _: &cpal::InputCallbackInfo| {
-                        feed(data, channels, map, &mut producers)
+                        feed(data, channels, &map, &mut producers)
                     },
                     err_fn,
                     None,
@@ -274,7 +284,7 @@ mod cpal_backend {
     /// De-interleaves one callback buffer into the three ring buffers, taking
     /// the device channels named by `map` (already validated against
     /// `channels`).
-    fn feed<T>(data: &[T], channels: usize, map: [usize; 3], producers: &mut Producers)
+    fn feed<T>(data: &[T], channels: usize, map: &[usize], producers: &mut Producers)
     where
         T: cpal::Sample,
         f32: FromSample<T>,

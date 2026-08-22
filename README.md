@@ -1,8 +1,17 @@
 # recurrent-visualizer
 
-Recurrence plot of three audio channels, rendered as
-`|in1[x]-in2[y]| * |in1[x]-in3[y]| * |in3[x]-in2[y]|` over a sliding window of
-the most recent samples, drawn as a single GPU texture.
+Recurrence plot of two or three audio channels, over a sliding window of the
+most recent samples, drawn as a single GPU texture.
+
+    --inputs 3   |a[x]-b[y]| * |a[x]-c[y]| * |c[x]-b[y]|   (default)
+    --inputs 2   |a[x]-b[y]|                               cross recurrence
+
+Only as many JACK ports or device channels as the chosen plot needs are
+claimed, so `--inputs 2` asks for two of everything.
+
+The two channel values run over roughly half the range of the three channel
+product, so the same `/factor` comes out brighter — expect to retune it when
+switching.
 
 Because the plot compares the three channels against each other, it wants them
 **uncorrelated**. Feeding it three channels that share a reverb, or the same
@@ -11,10 +20,12 @@ processing than about the sources.
 
 ### A diagonal from top-left to bottom-right
 
-That line is the recurrence plot's *line of identity*, and it means two of the
-three inputs carry the same signal. Where channel 3 equals channel 2 the factor
-`|in3[x]-in2[y]|` is exactly zero whenever `x == y`, so the whole diagonal goes
-black. With three genuinely distinct channels there is no such line:
+That line is the recurrence plot's *line of identity*, and it means two inputs
+carry the same signal. With `--inputs 3`, where channel 3 equals channel 2 the
+factor `|in3[x]-in2[y]|` is exactly zero whenever `x == y`, so the whole
+diagonal goes black; with `--inputs 2` the same happens when the two inputs
+match, since `|a[x]-b[y]|` is then zero on the diagonal by construction. With
+genuinely distinct channels there is no such line:
 
 | inputs | diagonal | off-diagonal |
 |---|---|---|
@@ -22,10 +33,12 @@ black. With three genuinely distinct channels there is no such line:
 | channel 3 duplicates channel 2 | **0.000** | 0.031 |
 | all three identical (mono) | **0.000** | 0.023 |
 
-The usual cause is an input device with fewer than three channels: without
-`--channels` the visualizer repeats the last available channel to fill the
-third, which duplicates it by construction. Check the `channel mapping` line it
-prints at startup, and the channel counts in `--list-devices`.
+The usual cause is an input device with fewer channels than the plot needs:
+without `--channels` the visualizer repeats the last available channel to fill
+the rest, which duplicates it by construction. Check the `channel mapping` line
+it prints at startup, and the channel counts in `--list-devices`. If you only
+have two channels to hand, `--inputs 2` is the honest plot rather than a three
+channel one with a duplicate.
 
 Audio input is JACK on Linux and CoreAudio on macOS. There is no JACK
 requirement on macOS.
@@ -44,12 +57,12 @@ Prebuilt macOS (Apple Silicon) binaries are attached to the
 
 ## Running on Linux (JACK / PipeWire)
 
-The app registers three JACK input ports and waits for you to patch something
-into them:
+The app registers one JACK input port per plot input and waits for you to patch
+something into them:
 
     visualizer:vis_in_1
     visualizer:vis_in_2
-    visualizer:vis_in_3
+    visualizer:vis_in_3     (only with --inputs 3, the default)
 
 Start it, then connect a source:
 
@@ -94,10 +107,12 @@ count:
 Then pick one, and say which of its channels to plot:
 
     ./visualizer-piston --device BlackHole --channels 4,5,6 -f
+    ./visualizer-piston --device BlackHole --inputs 2 --channels 4,5 -f
 
 `--device` matches on a substring of the device name, case-insensitively.
+`--channels` takes one channel per input, so two of them under `--inputs 2`.
 
-### Getting three channels in
+### Getting the channels in
 
 A built-in mic is mono, so for a real plot you need a multichannel input:
 either an audio interface, or a virtual device such as
@@ -106,7 +121,7 @@ a DAW or another application.
 
 ### Channel mapping
 
-`--channels` takes three **1-based** device channels. It exists because the
+`--channels` takes one **1-based** device channel per input. It exists because the
 signal you want is often not on the first three channels of the device — a
 BlackHole 16ch carrying a full mix, for example, where the interesting material
 sits on 4–6.
@@ -258,11 +273,12 @@ worth reading only if the picture looks wrong.
 
 ## Options
 
+    --inputs N         2 or 3 input channels (default 3)
     -f, --fullscreen   start fullscreen
     --fps N            frame rate (default 60)
     --length N         matrix side length (default 1000, max 4096)
     --device NAME      input device, substring match (CoreAudio only)
-    --channels A,B,C   device channels to plot, 1-based (default 1,2,3)
+    --channels A,B[,C] device channels to plot, 1-based, one per input
     --list-devices     list available inputs and exit
     --stats            print frame and audio rates once a second
     --display N        open on display N, 1-based

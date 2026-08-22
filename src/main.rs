@@ -59,6 +59,8 @@ struct Config {
     stats: bool,
     display: Option<usize>,
     list_displays: bool,
+    list_devices: bool,
+    plot: Plot,
 }
 
 impl Config {
@@ -72,6 +74,8 @@ impl Config {
             stats: false,
             display: None,
             list_displays: false,
+            list_devices: false,
+            plot: Plot::Three,
         };
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -106,27 +110,37 @@ impl Config {
                         Some(map) => cfg.channels = Some(map),
                         None => {
                             eprintln!(
-                                "--channels wants three comma separated 1-based channel \
-                                 numbers, e.g. --channels 4,5,6 (got {:?})",
+                                "--channels wants comma separated 1-based channel numbers, \
+                                 one per input, e.g. --channels 4,5,6 (got {:?})",
                                 raw
                             );
                             std::process::exit(2);
                         }
                     }
                 }
-                "--list-devices" => {
-                    audio::list_inputs();
-                    std::process::exit(0);
+                "--list-devices" => cfg.list_devices = true,
+                "--inputs" => {
+                    cfg.plot = match args.next().as_deref() {
+                        Some("2") => Plot::Two,
+                        Some("3") => Plot::Three,
+                        other => {
+                            eprintln!("--inputs wants 2 or 3 (got {:?})", other.unwrap_or(""));
+                            std::process::exit(2);
+                        }
+                    }
                 }
                 "-h" | "--help" => {
                     println!(
-                        "visualizer [--fullscreen] [--fps N] [--length N] [--device NAME] [--channels A,B,C]\n\
+                        "visualizer [--inputs 2|3] [--fullscreen] [--fps N] [--length N] [--device NAME] [--channels A,B[,C]]\n\
                          \n\
+                           --inputs N         2 or 3 input channels (default 3)\n\
+                           \x20                  3: |a[x]-b[y]| * |a[x]-c[y]| * |c[x]-b[y]|\n\
+                           \x20                  2: |a[x]-b[y]|, cross recurrence\n\
                            --fullscreen, -f   start fullscreen (F or F11 toggles, Esc quits)\n\
                            --fps N            frame/update rate (default 60)\n\
                            --length N         recurrence matrix side length (default 1000)\n\
                            --device NAME      input device, substring match (CoreAudio only)\n\
-                           --channels A,B,C   device channels to plot, 1-based (default 1,2,3)\n\
+                           --channels A,B[,C] device channels to plot, 1-based, one per input\n\
                            --list-devices     list available inputs and exit\n\
                            --stats            print frame and audio rates once a second\n\
                            --display N        open on display N, 1-based\n\
@@ -149,6 +163,27 @@ impl Config {
             cfg.length = clamped;
         }
         cfg.fps = cfg.fps.max(1);
+
+        // --channels is parsed before --inputs may have been seen, so the count
+        // can only be checked once every argument is in.
+        if let Some(map) = &cfg.channels {
+            let wanted = cfg.plot.inputs();
+            if map.len() != wanted {
+                eprintln!(
+                    "--inputs {} needs {} channel(s) in --channels, got {}",
+                    wanted,
+                    wanted,
+                    map.len()
+                );
+                std::process::exit(2);
+            }
+        }
+
+        if cfg.list_devices {
+            audio::list_inputs(cfg.plot.inputs());
+            std::process::exit(0);
+        }
+
         cfg
     }
 }
@@ -184,15 +219,62 @@ impl FilteredBuffer {
     }
 }
 
-/// Writes the visible crop of the recurrence matrix straight into an RGBA8
-/// pixel buffer, one row per rayon task.
+/// Which recurrence plot is drawn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Plot {
+    /// `|v1[x]-v2[y]|` — cross recurrence between two channels.
+    Two,
+    /// `|v1[x]-v2[y]| * |v1[x]-v3[y]| * |v3[x]-v2[y]|`.
+    Three,
+}
+
+impl Plot {
+    fn inputs(self) -> usize {
+        match self {
+            Plot::Two => 2,
+            Plot::Three => 3,
+        }
+    }
+}
+
+/// Maps one raw recurrence value to a grey level.
 ///
-/// The plot is the three channel product
-/// `|v1[x]-v2[y]| * |v1[x]-v3[y]| * |v3[x]-v2[y]|`, scaled by `factor`,
-/// optionally inverted (`bwmode`), then mapped to grey through `lut`, which
-/// carries the exponent.
+/// `bw_offset + bw_scale * t` is `1.0 - t` inverted or `t` plain, without a
+/// branch in the inner loop. Inverting *before* the table lookup matters: it
+/// keeps the table's relative precision on the quantity that actually gets
+/// raised to the exponent.
+#[inline(always)]
+fn shade(val: f32, factor: f32, bw_offset: f32, bw_scale: f32, lut: &[u8]) -> u8 {
+    // Saturate to [0, 1]; written so that NaN falls into the `else` branch
+    // rather than indexing out of bounds.
+    let t = val * factor;
+    let t = if t > 1.0 {
+        1.0
+    } else if t > 0.0 {
+        t
+    } else {
+        0.0
+    };
+    lut[lut_index(bw_offset + bw_scale * t)]
+}
+
+#[inline(always)]
+fn bw_terms(bwmode: u8) -> (f32, f32) {
+    if bwmode == 1 {
+        (1.0, -1.0)
+    } else {
+        (0.0, 1.0)
+    }
+}
+
+/// Writes the visible crop of the three channel recurrence matrix straight
+/// into an RGBA8 pixel buffer, one row per rayon task.
+///
+/// The plot is `|v1[x]-v2[y]| * |v1[x]-v3[y]| * |v3[x]-v2[y]|`, scaled by
+/// `factor`, optionally inverted (`bwmode`), then mapped to grey through `lut`,
+/// which carries the exponent.
 #[allow(clippy::too_many_arguments)]
-fn fill_pixels(
+fn fill_pixels_three(
     pixels: &mut [u8],
     v1: &[f32],
     v2: &[f32],
@@ -204,11 +286,7 @@ fn fill_pixels(
     start_y: usize,
     view: usize,
 ) {
-    // `bw_offset + bw_scale * t` is `1.0 - t` inverted or `t` plain, without a
-    // branch in the inner loop. Inverting *before* the table lookup matters:
-    // it keeps the table's relative precision on the quantity that actually
-    // gets raised to the exponent.
-    let (bw_offset, bw_scale) = if bwmode == 1 { (1.0, -1.0) } else { (0.0, 1.0) };
+    let (bw_offset, bw_scale) = bw_terms(bwmode);
 
     pixels
         .par_chunks_mut(view * 4)
@@ -223,19 +301,44 @@ fn fill_pixels(
                 let v3x = v3[x];
 
                 let val = (v1x - v2y).abs() * (v1x - v3y).abs() * (v3x - v2y).abs();
+                let g = shade(val, factor, bw_offset, bw_scale, lut);
+                px[0] = g;
+                px[1] = g;
+                px[2] = g;
+                px[3] = 255;
+            }
+        });
+}
 
-                // Saturate to [0, 1]; written so that NaN falls into the
-                // `else` branch rather than indexing out of bounds.
-                let t = val * factor;
-                let t = if t > 1.0 {
-                    1.0
-                } else if t > 0.0 {
-                    t
-                } else {
-                    0.0
-                };
+/// Two channel cross recurrence, `|v1[x]-v2[y]|`.
+///
+/// The values run over roughly half the range of the three channel product, so
+/// the same `/factor` looks darker here; expect to raise it.
+#[allow(clippy::too_many_arguments)]
+fn fill_pixels_two(
+    pixels: &mut [u8],
+    v1: &[f32],
+    v2: &[f32],
+    lut: &[u8],
+    factor: f32,
+    bwmode: u8,
+    start_x: usize,
+    start_y: usize,
+    view: usize,
+) {
+    let (bw_offset, bw_scale) = bw_terms(bwmode);
 
-                let g = lut[lut_index(bw_offset + bw_scale * t)];
+    pixels
+        .par_chunks_mut(view * 4)
+        .enumerate()
+        .for_each(|(row, out)| {
+            let y = start_y + row;
+            let v2y = v2[y];
+            for (col, px) in out.chunks_exact_mut(4).enumerate() {
+                let x = start_x + col;
+
+                let val = (v1[x] - v2y).abs();
+                let g = shade(val, factor, bw_offset, bw_scale, lut);
                 px[0] = g;
                 px[1] = g;
                 px[2] = g;
@@ -252,9 +355,9 @@ pub struct App {
     /// Scratch for draining the audio ring buffers.
     scratch: Vec<f32>,
     length: usize,
-    filtered_buffer1: FilteredBuffer,
-    filtered_buffer2: FilteredBuffer,
-    filtered_buffer3: FilteredBuffer,
+    /// One per input channel; `plot` decides how many there are.
+    buffers: Vec<FilteredBuffer>,
+    plot: Plot,
     lut: Vec<u8>,
     /// The exponent the current `lut` was built for.
     lut_exponent: f32,
@@ -270,7 +373,7 @@ pub struct App {
 }
 
 impl App {
-    fn new(opengl: OpenGL, length: usize) -> Self {
+    fn new(opengl: OpenGL, length: usize, plot: Plot) -> Self {
         // Nearest keeps the cells crisp the way the old rectangle-per-cell
         // renderer did; convert_gamma(true) selects the plain RGBA internal
         // format so the greys go to the framebuffer untouched.
@@ -295,9 +398,10 @@ impl App {
             pixels,
             scratch: Vec::with_capacity(FRAME_SIZE * 10),
             length,
-            filtered_buffer1: FilteredBuffer::new(length, 1),
-            filtered_buffer2: FilteredBuffer::new(length, 1),
-            filtered_buffer3: FilteredBuffer::new(length, 1),
+            buffers: (0..plot.inputs())
+                .map(|_| FilteredBuffer::new(length, 1))
+                .collect(),
+            plot,
             lut: vec![0u8; LUT_SIZE],
             lut_exponent: f32::NAN,
             factor: 1.0,
@@ -336,9 +440,7 @@ impl App {
 
     fn render(&mut self, args: &RenderArgs) {
         self.frames += 1;
-        let ready = self.filtered_buffer1.is_full()
-            && self.filtered_buffer2.is_full()
-            && self.filtered_buffer3.is_full();
+        let ready = self.buffers.iter().all(FilteredBuffer::is_full);
 
         if !ready {
             self.gl
@@ -352,18 +454,31 @@ impl App {
 
         let (view, start_x, start_y) = self.view_rect();
 
-        fill_pixels(
-            &mut self.pixels[..view * view * 4],
-            &self.filtered_buffer1.buffer,
-            &self.filtered_buffer2.buffer,
-            &self.filtered_buffer3.buffer,
-            &self.lut,
-            self.factor,
-            self.bwmode,
-            start_x,
-            start_y,
-            view,
-        );
+        match self.plot {
+            Plot::Three => fill_pixels_three(
+                &mut self.pixels[..view * view * 4],
+                &self.buffers[0].buffer,
+                &self.buffers[1].buffer,
+                &self.buffers[2].buffer,
+                &self.lut,
+                self.factor,
+                self.bwmode,
+                start_x,
+                start_y,
+                view,
+            ),
+            Plot::Two => fill_pixels_two(
+                &mut self.pixels[..view * view * 4],
+                &self.buffers[0].buffer,
+                &self.buffers[1].buffer,
+                &self.lut,
+                self.factor,
+                self.bwmode,
+                start_x,
+                start_y,
+                view,
+            ),
+        }
 
         // Only the visible crop is uploaded, so zooming in costs less, not more.
         UpdateTexture::update(
@@ -386,15 +501,15 @@ impl App {
         });
     }
 
-    fn update(
-        &mut self,
-        consumer1: &mut Consumer<f32>,
-        consumer2: &mut Consumer<f32>,
-        consumer3: &mut Consumer<f32>,
-    ) {
-        self.samples += drain(consumer1, &mut self.scratch, &mut self.filtered_buffer1);
-        drain(consumer2, &mut self.scratch, &mut self.filtered_buffer2);
-        drain(consumer3, &mut self.scratch, &mut self.filtered_buffer3);
+    fn update(&mut self, consumers: &mut [Consumer<f32>]) {
+        for (i, (consumer, buffer)) in consumers.iter_mut().zip(self.buffers.iter_mut()).enumerate()
+        {
+            let moved = drain(consumer, &mut self.scratch, buffer);
+            // One channel is enough for the --stats rate; they all run together.
+            if i == 0 {
+                self.samples += moved;
+            }
+        }
     }
 }
 
@@ -702,19 +817,19 @@ fn main() {
     #[cfg(target_os = "macos")]
     macos::disable_app_nap();
 
-    let ring_buffer_1 = RingBuffer::<f32>::new(FRAME_SIZE * 10);
-    let ring_buffer_2 = RingBuffer::<f32>::new(FRAME_SIZE * 10);
-    let ring_buffer_3 = RingBuffer::<f32>::new(FRAME_SIZE * 10);
-
-    let (producer_1, mut consumer_1) = ring_buffer_1.split();
-    let (producer_2, mut consumer_2) = ring_buffer_2.split();
-    let (producer_3, mut consumer_3) = ring_buffer_3.split();
+    let mut producers = Vec::with_capacity(cfg.plot.inputs());
+    let mut consumers = Vec::with_capacity(cfg.plot.inputs());
+    for _ in 0..cfg.plot.inputs() {
+        let (producer, consumer) = RingBuffer::<f32>::new(FRAME_SIZE * 10).split();
+        producers.push(producer);
+        consumers.push(consumer);
+    }
 
     // Held for the lifetime of the program; dropping it stops capture.
     let _audio: audio::Audio = match audio::start(
-        [producer_1, producer_2, producer_3],
+        producers,
         cfg.device.as_deref(),
-        cfg.channels,
+        cfg.channels.clone(),
     ) {
         Ok(audio) => audio,
         Err(e) => {
@@ -755,7 +870,7 @@ fn main() {
 
     let mut is_fullscreen = cfg.fullscreen;
 
-    let mut app = App::new(opengl, cfg.length);
+    let mut app = App::new(opengl, cfg.length, cfg.plot);
 
     let mut settings = EventSettings::new();
     settings.max_fps = cfg.fps;
@@ -889,7 +1004,7 @@ fn main() {
         }
 
         if e.update_args().is_some() {
-            app.update(&mut consumer_1, &mut consumer_2, &mut consumer_3);
+            app.update(&mut consumers);
         }
 
         if cfg.stats {
@@ -923,7 +1038,9 @@ mod tests {
     /// `alpha` over a black background, i.e. grey level == alpha. The only
     /// deliberate difference is the clamp, which the old code left to OpenGL
     /// (and which used to yield NaN for `bwmode == 1` with `val * factor > 1`).
+    #[allow(clippy::too_many_arguments)]
     fn reference(
+        plot: Plot,
         v1: &[f32],
         v2: &[f32],
         v3: &[f32],
@@ -933,7 +1050,12 @@ mod tests {
         exponent: f32,
         bwmode: u8,
     ) -> f32 {
-        let val = (v1[x] - v2[y]).abs() * (v1[x] - v3[y]).abs() * (v3[x] - v2[y]).abs();
+        let val = match plot {
+            Plot::Three => {
+                (v1[x] - v2[y]).abs() * (v1[x] - v3[y]).abs() * (v3[x] - v2[y]).abs()
+            }
+            Plot::Two => (v1[x] - v2[y]).abs(),
+        };
         let mut value = (val * factor).clamp(0.0, 1.0);
         if bwmode == 1 {
             value = 1.0 - value;
@@ -950,29 +1072,52 @@ mod tests {
         (f(0.31, 0.0), f(0.07, 1.3), f(0.53, 2.7))
     }
 
-    fn check(view: usize, start_x: usize, start_y: usize, factor: f32, exponent: f32, bwmode: u8) {
+    #[allow(clippy::too_many_arguments)]
+    fn check(
+        plot: Plot,
+        view: usize,
+        start_x: usize,
+        start_y: usize,
+        factor: f32,
+        exponent: f32,
+        bwmode: u8,
+    ) {
         let n = 64;
         let (v1, v2, v3) = signals(n);
         let lut = build_lut(exponent);
         let mut pixels = vec![0u8; view * view * 4];
 
-        fill_pixels(
-            &mut pixels,
-            &v1,
-            &v2,
-            &v3,
-            &lut,
-            factor,
-            bwmode,
-            start_x,
-            start_y,
-            view,
-        );
+        match plot {
+            Plot::Three => fill_pixels_three(
+                &mut pixels,
+                &v1,
+                &v2,
+                &v3,
+                &lut,
+                factor,
+                bwmode,
+                start_x,
+                start_y,
+                view,
+            ),
+            Plot::Two => fill_pixels_two(
+                &mut pixels,
+                &v1,
+                &v2,
+                &lut,
+                factor,
+                bwmode,
+                start_x,
+                start_y,
+                view,
+            ),
+        }
 
         for row in 0..view {
             for col in 0..view {
                 let px = &pixels[(row * view + col) * 4..][..4];
                 let expected = reference(
+                    plot,
                     &v1,
                     &v2,
                     &v3,
@@ -1001,7 +1146,7 @@ mod tests {
         for &exponent in &[0.25, 0.5, 1.0, 1.25, 2.0, 4.0] {
             for &factor in &[0.5, 1.0, 2.0, 8.0] {
                 for &bwmode in &[0, 1] {
-                    check(64, 0, 0, factor, exponent, bwmode);
+                    check(Plot::Three, 64, 0, 0, factor, exponent, bwmode);
                 }
             }
         }
@@ -1011,10 +1156,48 @@ mod tests {
     /// orientation the old `rectangle_by_corners(i * xfac, j * yfac, ..)` gave.
     #[test]
     fn crop_offsets_select_the_right_cells() {
-        check(16, 0, 0, 2.0, 1.0, 0);
-        check(16, 40, 7, 2.0, 1.0, 0);
-        check(16, 48, 48, 2.0, 1.0, 0);
-        check(1, 63, 63, 2.0, 1.0, 0);
+        for &plot in &[Plot::Three, Plot::Two] {
+            check(plot, 16, 0, 0, 2.0, 1.0, 0);
+            check(plot, 16, 40, 7, 2.0, 1.0, 0);
+            check(plot, 16, 48, 48, 2.0, 1.0, 0);
+            check(plot, 1, 63, 63, 2.0, 1.0, 0);
+        }
+    }
+
+    #[test]
+    fn two_channel_shading_matches_reference() {
+        for &exponent in &[0.25, 0.5, 1.0, 1.25, 2.0, 4.0] {
+            for &factor in &[0.5, 1.0, 2.0, 8.0] {
+                for &bwmode in &[0, 1] {
+                    check(Plot::Two, 64, 0, 0, factor, exponent, bwmode);
+                }
+            }
+        }
+    }
+
+    /// With two identical inputs the cross recurrence collapses onto the line
+    /// of identity: `|v[x]-v[y]|` is zero exactly where `x == y`, so the main
+    /// diagonal goes black while the rest does not.
+    #[test]
+    fn two_channel_identical_inputs_give_a_black_diagonal() {
+        let n = 64;
+        let (v1, _, _) = signals(n);
+        let lut = build_lut(1.0);
+        let mut pixels = vec![0u8; n * n * 4];
+
+        fill_pixels_two(&mut pixels, &v1, &v1, &lut, 4.0, 0, 0, 0, n);
+
+        let at = |x: usize, y: usize| pixels[(y * n + x) * 4];
+        let mut off_total = 0u64;
+        for i in 0..n {
+            assert_eq!(at(i, i), 0, "diagonal cell {} should be black", i);
+            for j in 0..n {
+                if i != j {
+                    off_total += at(i, j) as u64;
+                }
+            }
+        }
+        assert!(off_total > 0, "the rest of the plot should not be black");
     }
 
     /// Zoom/offset clamping: the crop must always stay inside the matrix.
