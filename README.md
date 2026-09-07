@@ -112,6 +112,26 @@ Then pick one, and say which of its channels to plot:
 `--device` matches on a substring of the device name, case-insensitively.
 `--channels` takes one channel per input, so two of them under `--inputs 2`.
 
+### The whole thing at once
+
+Three channels off BlackHole, fullscreen on the projector:
+
+    ./visualizer-piston --device BlackHole --channels 4,5,6 --display 2 -f
+
+Note the two dashes on `--display`; `-f` is the one short option. Unknown
+arguments are refused rather than ignored, so a missing dash stops the app
+instead of putting the picture on the wrong screen.
+
+Run `--list-displays` once on the venue's setup to find the projector's number,
+then read the three lines printed at startup before the piece begins:
+
+    audio input: BlackHole 16ch (16 channel(s), 48000 Hz, f32)
+    channel mapping: 4 -> plot 1, 5 -> plot 2, 6 -> plot 3
+    fullscreen on Monitor #0 (1920x1080 points at (1728, 0))
+
+A fourth line beginning `fullscreen: asked for` means the window did not take
+the frame it was given; see [Choosing the display](#choosing-the-display).
+
 ### Getting the channels in
 
 A built-in mic is mono, so for a real plot you need a multichannel input:
