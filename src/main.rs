@@ -151,7 +151,14 @@ impl Config {
                     );
                     std::process::exit(0);
                 }
-                other => eprintln!("ignoring unknown argument: {}", other),
+                // Loudly, rather than carrying on with a default: a mistyped
+                // flag (`-display 2` for `--display 2`) would otherwise put a
+                // performance on the wrong screen with only a line of stderr
+                // to say so.
+                other => {
+                    eprintln!("unknown argument: {} (see --help)", other);
+                    std::process::exit(2);
+                }
             }
         }
         // The matrix is uploaded as a length x length texture, so keep it
