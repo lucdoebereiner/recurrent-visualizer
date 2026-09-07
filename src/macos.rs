@@ -1,5 +1,8 @@
 //! macOS specific workarounds.
 
+use cocoa::appkit::{NSScreen, NSWindow};
+use cocoa::base::{id, YES};
+use cocoa::foundation::{NSPoint, NSRect, NSSize};
 use std::os::raw::c_void;
 
 /// `NSWindow` level that sits just above the menu bar (`NSMainMenuWindowLevel`
@@ -156,5 +159,92 @@ pub fn disable_app_nap() {
         let token: *mut Object =
             msg_send![process_info, beginActivityWithOptions: options reason: reason];
         let _: *mut Object = msg_send![token, retain];
+    }
+}
+
+/// A rectangle in Cocoa points, bottom-left origin — the coordinate system
+/// `NSWindow`'s `setFrame:display:` works in, and the one `NSScreen` reports
+/// its own geometry in.
+///
+/// Points are what make this worth having. A point is a point on whichever
+/// display the rectangle lands on, so a screen's frame describes the target
+/// absolutely, with no scale factor anywhere in the description. Every winit
+/// route to the same job converts through the *window's* scale factor as it is
+/// at the moment of the call, which is the wrong one whenever the window has
+/// not reached the target display yet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl Frame {
+    fn from_ns(rect: NSRect) -> Frame {
+        Frame {
+            x: rect.origin.x,
+            y: rect.origin.y,
+            width: rect.size.width,
+            height: rect.size.height,
+        }
+    }
+
+    fn to_ns(self) -> NSRect {
+        NSRect::new(
+            NSPoint::new(self.x, self.y),
+            NSSize::new(self.width, self.height),
+        )
+    }
+
+    /// Whether the window has arrived. AppKit rounds frames to the backing
+    /// grid, so a fraction of a point out is not a failure.
+    pub fn matches(self, other: Frame) -> bool {
+        let close = |a: f64, b: f64| (a - b).abs() <= 1.0;
+        close(self.x, other.x)
+            && close(self.y, other.y)
+            && close(self.width, other.width)
+            && close(self.height, other.height)
+    }
+
+    /// This rectangle's size, centred on `screen`.
+    pub fn centered_on(self, screen: Frame) -> Frame {
+        Frame {
+            x: screen.x + (screen.width - self.width) / 2.0,
+            y: screen.y + (screen.height - self.height) / 2.0,
+            ..self
+        }
+    }
+}
+
+/// The full frame of a screen, menu bar area included — `visibleFrame` would
+/// stop short of it, and the menu bar is hidden anyway.
+pub fn screen_frame(ns_screen: *mut c_void) -> Option<Frame> {
+    let screen = ns_screen as id;
+    if screen.is_null() {
+        return None;
+    }
+    Some(Frame::from_ns(unsafe { NSScreen::frame(screen) }))
+}
+
+pub fn window_frame(ns_window: *mut c_void) -> Option<Frame> {
+    let window = ns_window as id;
+    if window.is_null() {
+        return None;
+    }
+    Some(Frame::from_ns(unsafe { NSWindow::frame(window) }))
+}
+
+/// Sets origin and size in one call, which `set_outer_position` followed by
+/// `set_inner_size` does not: `setContentSize:` keeps the frame's *bottom*-left
+/// corner where it is, so resizing after positioning by the top-left corner
+/// drops the window down the screen by the difference.
+pub fn set_window_frame(ns_window: *mut c_void, frame: Frame) {
+    let window = ns_window as id;
+    if window.is_null() {
+        return;
+    }
+    unsafe {
+        NSWindow::setFrame_display_(window, frame.to_ns(), YES);
     }
 }

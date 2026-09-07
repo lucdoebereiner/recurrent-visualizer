@@ -220,8 +220,9 @@ say so at startup:
     ./visualizer-piston --display 2 -f
 
 `--display` is 1-based and positions the window on that display before going
-fullscreen. Display numbering follows the order the OS reports, which need not
-match the arrangement in the system settings; `--list-displays` prints each
+fullscreen; without `-f` it centres the window there. Display numbering
+follows the order the OS reports, which need not match the arrangement in the
+system settings; `--list-displays` prints each
 one's name, size and pixel position so you can tell them apart:
 
     displays:
@@ -233,41 +234,41 @@ scaled to fill the window, so a lower-resolution projector simply gets fewer
 pixels. If the display is much narrower than the matrix, a smaller `--length`
 (say 600) samples it more honestly than squeezing 1000 cells into 800 pixels.
 
-On macOS, fullscreen is done by hand rather than through winit, and is sized
-explicitly to the chosen monitor. Three separate problems made the obvious
-routes unreliable:
+On macOS, fullscreen is done by hand rather than through winit, and the window
+is placed by setting its Cocoa frame directly. Four separate problems made the
+obvious routes unreliable:
 
 - `Fullscreen::Borderless` goes through `toggleFullScreen:` and allocates a
   Space, which is what froze the picture on losing focus.
 - `set_simple_fullscreen` avoids the Space, but sizes to whichever screen it
   believes the window is on *at that instant* — which races with having just
   moved the window to another display, so it would size to the internal screen.
+- `set_outer_position` and `set_inner_size` convert their argument through the
+  **window's** scale factor as it is at the moment of the call. Aiming at a 1x
+  projector while the window still sits on a 2x Retina display therefore halves
+  the request. And the size is applied with `setContentSize:`, which pins the
+  frame's *bottom*-left corner, so the half-size window drops into the bottom
+  left quarter of the display rather than the top left corner. A window
+  occupying exactly the bottom left quadrant of the external screen was this.
 - `glutin_window` re-attaches the GL context only on `Resized` and discards
   `ScaleFactorChanged`, so a move between displays of different scale factors
   (a Retina laptop and a 1x projector) left the framebuffer at its old size.
 
-The window is now positioned and sized directly to the monitor's own geometry,
-the window size is tracked across frames, and the context re-attached whenever
-it changes.
+The target is therefore described in the one unit that carries no scale factor:
+Cocoa points. An `NSScreen`'s own frame is exactly the rectangle wanted, and
+`setFrame:display:` sets origin and size in a single call, so there is no
+intermediate state for the window to land in. The window size is tracked across
+frames as well, and the GL context re-attached whenever it changes.
 
-Doing it by hand is still not enough on its own, because `set_outer_position`,
-`set_inner_size` and `set_decorations` are all applied *asynchronously* on the
-main run loop, and both geometry calls convert through the window's scale
-factor **as it is when they are called** — so aiming at a 1x projector while the
-window still sits on a 2x internal display halves the request. That is why
-`--display N -f` used to work only sometimes. The requested geometry is now
-re-applied until the window reports it, at most every 100 ms and for at most
-three seconds; the scale factor is read live, so once the window has landed on
-the target display the request converts correctly and sticks.
+The frame is re-applied for up to two seconds, because removing the window
+decorations is queued on the run loop, and until that takes effect AppKit
+constrains a *titled* window's frame to clear the menu bar. If the window never
+takes the frame, one line says so:
 
-The window does not always report exactly what was asked for — a scaled display
-mode rounds the backing store — so this settles on the size going *stable*
-rather than on an exact match, and just says what it ended up with:
+    fullscreen: asked for 1920x1080 at (1728, 0), window settled at 960x540 at (1728, 0)
 
-    fullscreen: asked for 1920x1080, window settled at 1728x1080
-
-That line is informational. The window covers the display either way; it is
-worth reading only if the picture looks wrong.
+Seeing that line means something is wrong and is worth reporting. Not seeing it
+means the window got the frame it asked for.
 
 ---
 

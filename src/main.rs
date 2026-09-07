@@ -4,7 +4,6 @@ mod macos;
 
 #[cfg(not(target_os = "macos"))]
 use glutin::window::Fullscreen;
-use glutin::dpi::{PhysicalPosition, PhysicalSize};
 use glutin::monitor::MonitorHandle;
 use glutin_window::GlutinWindow as Window;
 use graphics::{clear, color, Image};
@@ -603,20 +602,35 @@ fn list_displays(window: &Window) {
 /// lands there.
 fn place_on_display(window: &Window, index: usize) {
     let monitors: Vec<_> = window.ctx.window().available_monitors().collect();
-    match monitors.get(index) {
-        Some(monitor) => {
-            println!(
-                "opening on display {} ({})",
-                index + 1,
-                monitor.name().unwrap_or_else(|| "<unnamed>".into())
-            );
-            window.ctx.window().set_outer_position(monitor.position());
-        }
+    let monitor = match monitors.get(index) {
+        Some(monitor) => monitor,
         None => {
             eprintln!("no display {}; available:", index + 1);
             list_displays(window);
+            return;
+        }
+    };
+
+    println!(
+        "opening on display {} ({})",
+        index + 1,
+        monitor.name().unwrap_or_else(|| "<unnamed>".into())
+    );
+
+    // Same scale-factor trap as fullscreen, so take the same Cocoa route:
+    // keep the window's size and centre it on the target screen, in points.
+    #[cfg(target_os = "macos")]
+    {
+        use glutin::platform::macos::{MonitorHandleExtMacOS, WindowExtMacOS};
+        let ns_window = window.ctx.window().ns_window();
+        let screen = monitor.ns_screen().and_then(macos::screen_frame);
+        if let (Some(screen), Some(current)) = (screen, macos::window_frame(ns_window)) {
+            macos::set_window_frame(ns_window, current.centered_on(screen));
+            return;
         }
     }
+
+    window.ctx.window().set_outer_position(monitor.position());
 }
 
 /// The monitor a fullscreen window should cover: the one named by `--display`
@@ -629,59 +643,66 @@ fn target_monitor(window: &Window, display: Option<usize>) -> Option<MonitorHand
     }
 }
 
-/// Windowed geometry, remembered so leaving fullscreen can restore it.
-type SavedGeometry = Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>;
+/// How the fullscreen geometry is described.
+///
+/// On macOS that is a Cocoa frame in points, the only description of the target
+/// that carries no scale factor. There is nothing to describe on the other
+/// platforms, where winit's own fullscreen does the work.
+#[cfg(target_os = "macos")]
+type Geometry = Option<macos::Frame>;
+#[cfg(not(target_os = "macos"))]
+type Geometry = Option<()>;
 
 /// Applies fullscreen and returns the geometry it asked for, so the caller can
 /// check that it actually took.
-fn set_fullscreen(
-    window: &Window,
-    on: bool,
-    display: Option<usize>,
-    saved: &mut SavedGeometry,
-) -> Option<(PhysicalPosition<i32>, PhysicalSize<u32>)> {
-    // macOS gets fullscreen by hand rather than through winit.
+///
+/// `saved` holds the windowed geometry, so leaving fullscreen can restore it.
+fn set_fullscreen(window: &Window, on: bool, display: Option<usize>, saved: &mut Geometry) -> Geometry {
+    // macOS gets fullscreen by hand rather than through winit, and by way of
+    // Cocoa rather than through winit's geometry calls.
     //
     // `Fullscreen::Borderless` routes through `toggleFullScreen:` and allocates
     // a Space, which is what froze the picture on losing focus, and
     // `set_simple_fullscreen` sizes to whichever screen it believes the window
     // is on at that instant.
     //
-    // Doing it by hand is not enough on its own either: `set_outer_position`,
-    // `set_inner_size` and `set_decorations` are all applied *asynchronously*
-    // on the main run loop, and both geometry calls convert through the
-    // window's scale factor as it is when they are called. Aiming a 1x external
-    // display while the window still sits on a 2x internal one therefore
-    // halves the request. That is why this used to work only sometimes. The
-    // caller re-applies the returned geometry until the window reports it.
+    // `set_outer_position` plus `set_inner_size` is no better, for three
+    // reasons at once. Both convert their argument through the *window's* scale
+    // factor as it is when the call is made, so aiming at a 1x projector while
+    // the window still sits on a 2x internal display halves the request. The
+    // size is applied with `setContentSize:`, which pins the frame's bottom
+    // left corner, so the halved window ends up in the bottom left quarter of
+    // the projector rather than the top left. And both are queued on the run
+    // loop, so when they take effect is not ours to choose.
+    //
+    // A Cocoa frame in points has none of those problems: it names the target
+    // rectangle absolutely, `setFrame:display:` sets origin and size together,
+    // and the screen's own frame is exactly the rectangle wanted.
     #[cfg(target_os = "macos")]
     {
-        use glutin::platform::macos::WindowExtMacOS;
+        use glutin::platform::macos::{MonitorHandleExtMacOS, WindowExtMacOS};
         let w = window.ctx.window();
+        let ns_window = w.ns_window();
 
         if on {
             let monitor = target_monitor(window, display)?;
+            let frame = monitor.ns_screen().and_then(macos::screen_frame)?;
             if saved.is_none() {
-                *saved = Some((
-                    w.outer_position().unwrap_or(PhysicalPosition::new(0, 0)),
-                    w.inner_size(),
-                ));
+                *saved = macos::window_frame(ns_window);
             }
 
-            let position = monitor.position();
-            let size = monitor.size();
             println!(
-                "fullscreen on {} ({}x{} at {}, {})",
+                "fullscreen on {} ({}x{} points at ({}, {}))",
                 monitor.name().unwrap_or_else(|| "<unnamed>".into()),
-                size.width,
-                size.height,
-                position.x,
-                position.y
+                frame.width,
+                frame.height,
+                frame.x,
+                frame.y
             );
 
+            // Decorations go first: AppKit constrains a *titled* window's frame
+            // to clear the menu bar, and would shrink the one asked for here.
             w.set_decorations(false);
-            w.set_outer_position(position);
-            w.set_inner_size(size);
 
             // Two independent mechanisms, because neither suffices alone: the
             // presentation options only apply while this app is frontmost, and
@@ -689,17 +710,17 @@ fn set_fullscreen(
             // whereas the raised window level covers the menu bar regardless.
             macos::activate();
             macos::hide_menu_bar_and_dock();
-            macos::set_window_level(w.ns_window(), macos::LEVEL_ABOVE_MENU_BAR);
+            macos::set_window_level(ns_window, macos::LEVEL_ABOVE_MENU_BAR);
 
-            return Some((position, size));
+            macos::set_window_frame(ns_window, frame);
+            return Some(frame);
         }
 
-        macos::set_window_level(w.ns_window(), macos::LEVEL_NORMAL);
+        macos::set_window_level(ns_window, macos::LEVEL_NORMAL);
         macos::restore_presentation_options();
         w.set_decorations(true);
-        if let Some((position, size)) = saved.take() {
-            w.set_outer_position(position);
-            w.set_inner_size(size);
+        if let Some(frame) = saved.take() {
+            macos::set_window_frame(ns_window, frame);
         }
         return None;
     }
@@ -717,96 +738,90 @@ fn set_fullscreen(
     }
 }
 
-/// Keeps re-applying the requested fullscreen geometry until the window
-/// reports it, because the macOS calls that set it are asynchronous and
-/// scale-factor dependent (see `set_fullscreen`).
+/// Re-applies the requested fullscreen frame until the window reports it.
 ///
-/// The window does not always end up reporting exactly what was asked for — a
-/// scaled display mode rounds the backing store — so this settles on the
-/// geometry going *stable*, not on an exact match, and says what it ended up
-/// with when the two differ.
+/// `setFrame:display:` is exact and normally lands first time, but the style
+/// mask change that strips the decorations is queued on the run loop, and until
+/// it takes effect AppKit constrains the frame of a titled window to clear the
+/// menu bar. A retry afterwards settles it. The deadline is there so that a
+/// display which simply will not take the frame does not spin forever.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct FullscreenEnforcer {
-    target: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
-    started: Instant,
+    target: Geometry,
     deadline: Instant,
     last_apply: Instant,
-    last_seen: Option<PhysicalSize<u32>>,
-    stable_polls: u32,
     settled: bool,
 }
 
-/// How long the size must hold still before it counts as final.
-const STABLE_POLLS: u32 = 12;
-/// Re-applying on every frame just queues up async work; this is often enough.
-const APPLY_INTERVAL: Duration = Duration::from_millis(100);
-/// The window needs a moment to reach the other display before its size
-/// holding still means anything.
-const SETTLE_GRACE: Duration = Duration::from_millis(700);
+/// Re-applying on every frame only queues up work; this is often enough.
+#[cfg(target_os = "macos")]
+const APPLY_INTERVAL: Duration = Duration::from_millis(50);
+/// How long to keep trying before accepting whatever the window ended up with.
+const APPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl FullscreenEnforcer {
     fn new() -> Self {
         FullscreenEnforcer {
             target: None,
-            started: Instant::now(),
             deadline: Instant::now(),
             last_apply: Instant::now(),
-            last_seen: None,
-            stable_polls: 0,
             settled: true,
         }
     }
 
-    fn aim(&mut self, target: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>) {
+    fn aim(&mut self, target: Geometry) {
         let now = Instant::now();
-        self.target = target;
         self.settled = target.is_none();
-        self.started = now;
-        self.deadline = now + Duration::from_secs(3);
+        self.target = target;
+        self.deadline = now + APPLY_TIMEOUT;
         self.last_apply = now;
-        self.last_seen = None;
-        self.stable_polls = 0;
     }
 
     fn poll(&mut self, window: &Window) {
-        let (position, size) = match self.target {
-            Some(target) if !self.settled => target,
-            _ => return,
-        };
+        #[cfg(target_os = "macos")]
+        {
+            use glutin::platform::macos::WindowExtMacOS;
 
-        let w = window.ctx.window();
-        let actual = w.inner_size();
+            let target = match self.target {
+                Some(target) if !self.settled => target,
+                _ => return,
+            };
+            let ns_window = window.ctx.window().ns_window();
+            let actual = macos::window_frame(ns_window);
 
-        // A couple of pixels out is rounding in a scaled display mode, not a
-        // failure.
-        let matches = (actual.width as i64 - size.width as i64).abs() <= 2
-            && (actual.height as i64 - size.height as i64).abs() <= 2;
-        if matches {
-            self.settled = true;
-            return;
+            if actual.map_or(false, |actual| actual.matches(target)) {
+                self.settled = true;
+                return;
+            }
+
+            let now = Instant::now();
+            if now >= self.deadline {
+                self.settled = true;
+                if let Some(actual) = actual {
+                    println!(
+                        "fullscreen: asked for {}x{} at ({}, {}), window settled at {}x{} at ({}, {})",
+                        target.width,
+                        target.height,
+                        target.x,
+                        target.y,
+                        actual.width,
+                        actual.height,
+                        actual.x,
+                        actual.y
+                    );
+                }
+                return;
+            }
+
+            if now - self.last_apply >= APPLY_INTERVAL {
+                self.last_apply = now;
+                macos::set_window_frame(ns_window, target);
+            }
         }
 
-        if self.last_seen == Some(actual) {
-            self.stable_polls += 1;
-        } else {
-            self.last_seen = Some(actual);
-            self.stable_polls = 0;
-        }
-
-        let now = Instant::now();
-        let held_still = self.stable_polls >= STABLE_POLLS && now - self.started >= SETTLE_GRACE;
-        if held_still || now >= self.deadline {
-            self.settled = true;
-            println!(
-                "fullscreen: asked for {}x{}, window settled at {}x{}",
-                size.width, size.height, actual.width, actual.height
-            );
-            return;
-        }
-
-        if now - self.last_apply >= APPLY_INTERVAL {
-            self.last_apply = now;
-            w.set_outer_position(position);
-            w.set_inner_size(size);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = window;
         }
     }
 }
@@ -862,7 +877,7 @@ fn main() {
         window.ctx.window().ns_window()
     });
 
-    let mut saved_geometry: SavedGeometry = None;
+    let mut saved_geometry: Geometry = None;
     let mut enforcer = FullscreenEnforcer::new();
     if cfg.fullscreen {
         enforcer.aim(set_fullscreen(&window, true, cfg.display, &mut saved_geometry));

@@ -25,9 +25,12 @@ jack = "0.11.4"
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 cpal = "0.15"
 
-# For the App Nap workaround; already in the tree via winit.
+# Both already in the tree via winit, at these versions. objc is for the
+# presentation options and window level, cocoa for setting the window frame in
+# points (see src/macos.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
+cocoa = "0.24"
 
 [profile.release]
 opt-level = 3
